@@ -1,0 +1,167 @@
+---
+title: "IssuePredictionModel"
+author: "epkanol"
+date: "2022-10-18"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(rethinking)
+```
+
+## Simulating issue prediction with Bayesian Models
+```{r init_sim}
+N <- 150
+
+# probability of a file being untouched in a given week
+prob_untouched <- 0.2
+# figure out how to normalize this relative to the change
+rate_introd <- 3.5 # when I change file, I'm likely to introduce 3 issues of said type (or rates?)
+rate_fixed <- 1 # when I change the file, I'm likely to fix 1 issue
+
+# on average, we add 10 rows per week
+change_size <- rnorm(N, 10, 25)
+# tells how "scouty" our average developer are. High value -> more likely to remove issues, less likely to add new ones
+scoutiness <- rbinom(N, 10, .75)
+
+SZ <- (change_size - mean(change_size))/sd(change_size)
+SC <- (scoutiness - mean(scoutiness))/sd(scoutiness)
+
+# probability could also be a linear model
+
+# need to figure out a better way to represent the positive rate lrnorm?
+orig_rate_introd <- 30 + 3 * SZ #- SC - make it a simple one-dimensional model for now...
+orig_rate_fixed <- 50 + 3 * SZ #+ 2 * SC
+
+# the max(0) truncation here yields very many more 0s than what would be expected of the formula...
+rate_introd <- sapply(orig_rate_introd, max, -10)
+rate_fixed <- sapply(orig_rate_fixed, max, -10)
+
+# sample three years - assume Xmas and NewYears off, so keep only 50 weeks/year
+N <- 150
+set.seed(700716)
+untouched <- rbinom(N, 1, prob_untouched)
+
+# simulate issues introduced
+introd <- (1-untouched) * rpois(N, rate_introd)
+fixed <- (1-untouched) * rpois(N, rate_fixed)
+```
+
+```{r}
+simplehist(introd, xlab="issues introduced", lwd=4)
+simplehist(fixed, xlab="issues fixed", lwd=4)
+```
+
+### Recovering the model parameters
+
+Most likely, should scale the data as well - question then becomes, what metrics should we use for baselining?
+ML course seems to think "take out a sample, and use that for scaling"
+Don't let the scaling influence the predictions (remember Combient course...)
+
+(first prior predictive checks...)
+Yay! Because of the log-link function, my "flat priors" make no sense whatsoever, and actually wrecked the entire Prague! See chapter 11!
+```{r}
+issue_model <- ulam(
+  alist(
+    y ~ dzipois(p, lambda),
+    logit(p) <- ap, # assume simplest possible model
+    log(lambda) <- al + bsize * size + bscout * scout,
+    ap ~ dnorm(0, 1),
+    al ~ dnorm(30, 30),
+    bsize ~ dnorm(20, 40),
+    bscout ~ dnorm(10, 10)
+  ), data=list(y=introd, size=change_size, scout=scoutiness), chains=4)
+```
+
+Model cannot recover anything, because the priors are not sensible at all
+
+```{r}
+precis(issue_model)
+post <- extract.samples(issue_model)
+mean(inv_logit(post$ap))
+```
+If log(lambda) has a normal distribution, then lambda has a log-normal distribution.
+Plotting the priors
+```{r}
+curve(dlnorm(x, 30, 30), from=0, to=100, n=200)
+```
+That is a prior that is extremely biased towards 0
+
+Seeking a more sensible prior:
+```{r}
+curve(dlnorm(x, 3, .5), from=0, to=100, n=200)
+```
+
+Prior for beta:
+
+Choosing blindly, we chose a norm(20,40) prior for beta
+```{r}
+Nbeta <- 100
+a <- rnorm(Nbeta, 3, .5)
+b <- rnorm(Nbeta)
+plot(NULL, xlim=c(-2,2), ylim=c(0,100))
+for (i in 1:Nbeta) curve(exp(a[i] + b[i]*x), add=TRUE, col=grau())
+```
+
+```{r }
+Nbeta <- 100
+a <- rnorm(Nbeta, 3, 0.5)
+b <- rnorm(Nbeta, 0, 0.45)
+plot(NULL, xlim=c(-2,2), ylim=c(0,100))
+for (i in 1:Nbeta) curve(exp(a[i] + b[i]*x), add=TRUE, col=grau())
+```
+# Viewing the priors on the natural outcome scale
+
+```{r}
+x_seq <- seq(from=log(100), to=log(200000), length.out=100)
+lambda <- sapply(x_seq, function(x) exp(a+b*x))
+plot(NULL, xlim=range(x_seq), ylim=c(0,500), xlab="size", ylab="issues introduced")
+for (i in 1:Nbeta) lines(x_seq, lambda[i,], col=grau(), lwd=1.5)
+
+```
+
+Settling on a Norm(0, 0.2) prior for betas (assuming standardized measurement variables). How does ulam fare now?
+
+```{r}
+issue_model <- ulam(
+  alist(
+    y ~ dzipois(p, lambda),
+    logit(p) <- ap, # assume simplest possible model
+    log(lambda) <- al + bsize * size + bscout * scout,
+    ap ~ dnorm(0, 1.5),
+    al ~ dnorm(3, .5),
+    bsize ~ dnorm(0, 0.2),
+    bscout ~ dnorm(0, 0.5)
+  ), data=list(y=introd, size=SZ, scout=SC), chains=4)
+```
+
+```{r}
+precis(issue_model)
+```
+```{r}
+post <- extract.samples(issue_model)
+mean(inv_logit(post$ap))
+```
+```{r}
+ns <- 100
+SZ_seq <- seq(from=-1.4, to=3, length.out=ns)
+SC_seq <- seq(from=-1.4, to=3, length.out=ns)
+lambda <- link(issue_model, data=data.frame(size=SZ_seq, scout=SC_seq))
+lmu <- apply(lambda$lambda, 2, mean)
+lci <- apply(lambda$lambda, 2, PI)
+plot(NULL, xlim=range(SZ_seq), ylim=c(0,150), xlab="size", ylab="issues introduced")
+lines(SZ_seq, lmu, lty=1, lwd=1.5)
+shade(lci, SZ_seq, xpd=TRUE)
+```
+```{r}
+exp(0.12)
+
+```
+
+Question for my Bayesian buddies - Why does my model tell me that mean(bsize) is 0.12 (which would mean 1.12 when exponentiated)
+```{r}
+exp(1.127497)
+```
+Now, when I exponentiate _that_ value again, then I get back my 3? What gives?
+
