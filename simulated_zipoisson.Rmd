@@ -40,6 +40,38 @@ simplehist(introd, xlab="issues introduced", lwd=4)
 ```
 
 
+### brms model (zi NegBin)
+
+```{r}
+# given that var(y) != mean(y) a Poisson might not be the right thing to use.
+library(brms) # rethinking does not have support for zi-negbin
+
+introd <- as.numeric(introd)
+size <- scale(change_size)
+scout <- scale(scoutiness)
+
+d <- data.frame(y = introd, size = size, scout = scout)
+
+p <- get_prior(bf(
+  y ~ 1 + size + scout,
+  zi ~ 1),
+  family = zero_inflated_negbinomial(),
+  data = d)
+
+p[1,1] <- "normal(0, 0.5)"
+p[4,1] <- "normal(0, 1)"
+
+m1 <- brm(bf(
+  y ~ 1 + size + scout,
+  zi ~ 1),
+  family = zero_inflated_negbinomial(),
+  data = d,
+  prior = p
+)
+
+summary(m1)
+```
+
 ### Recovering the model parameters
 
 ```{r}
