@@ -21,13 +21,13 @@ prob_untouched <- 0.2
 # on average, we add 10 rows per week
 change_size <- rnorm(N, 10, 25)
 # tells how "scouty" our average developer are. High value -> more likely to remove issues, less likely to add new ones
-scoutiness <- rbinom(N, 10, .75)
+scoutiness <- rbinom(N, 10, .66)
 
 SZ <- (change_size - mean(change_size))/sd(change_size)
 SC <- (scoutiness - mean(scoutiness))/sd(scoutiness)
 
 # need to figure out a better way to represent the positive rate lrnorm?
-rate_introd <- 30 + 3 * SZ - SC 
+rate_introd <- exp(2.4 + .33 * SZ - SC)
 
 untouched <- rbinom(N, 1, prob_untouched)
 
@@ -58,17 +58,17 @@ issue_model <- ulam(
 ```{r}
 precis(issue_model)
 ```
+
+With the corrected lambda (making log(lambda) into a linear model), we can easily recover the parameters of the model.
+
 ```{r}
 post <- extract.samples(issue_model)
 mean(inv_logit(post$ap))
-mean(exp(post$al))
-mean(exp(post$bsize))
-mean(exp(post$bscout))
 ```
 ```{r}
 ns <- 100
-SZ_seq <- seq(from=-1.4, to=3, length.out=ns)
-SC_seq <- seq(from=-1.4, to=3, length.out=ns)
+SZ_seq <- seq(from=-3, to=3, length.out=ns)
+SC_seq <- seq(from=-3, to=3, length.out=ns)
 lambda <- link(issue_model, data=data.frame(size=SZ_seq, scout=SC_seq))
 lmu <- apply(lambda$lambda, 2, mean)
 lci <- apply(lambda$lambda, 2, PI)
@@ -85,12 +85,9 @@ shade(lci, SC_seq, xpd=TRUE)
 
 Question for my Bayesian buddies, including Prof. Torkar:
 
-* My model does a good job in recovering the "scalar parameters", ap and al.
-* Why does my model fail to recover "the real betas" (3 and -1 respectively, in my model)?
-* How, in general, would a negative beta be recovered? (In my example, bscout is -1 in the generated data). Seeing that exp(bscout) is always positive?
-
-
-
+* In my analysis, I standardized the data, using the complete data set, then used that data to recover the parameters.
+* My hunch is that this introduces a risk of overfitting - making the model trust the data too much.
+* I guess we should have sampled some data, standardized using that dataset, and then run the model on the remainder - akin to ML train/test/validation sets?
 
 
 
@@ -119,6 +116,7 @@ b <- rnorm(Nbeta, 20, 40)
 plot(NULL, xlim=c(-2,2), ylim=c(0,100))
 for (i in 1:Nbeta) curve(exp(a[i] + b[i]*x), add=TRUE, col=grau())
 ```
+
 Wild linear relationships - we need to tame the prior.
 
 
@@ -130,7 +128,7 @@ plot(NULL, xlim=c(-2,2), ylim=c(0,100))
 for (i in 1:Nbeta) curve(exp(a[i] + b[i]*x), add=TRUE, col=grau())
 ```
 
-The Normal(0, 0.4) prior allows some strong relationships, while keeping most of the lines relatively straight.
+The Normal(0, 0.4) prior allows some strong relationships, while keeping most of the lines relatively straight (skeptical of the data).
 
 ### Viewing the priors on the natural outcome scale
 
@@ -142,4 +140,4 @@ for (i in 1:Nbeta) lines(x_seq, lambda[i,], col=grau(), lwd=1.5)
 
 ```
 
-Most of the priors are relatively flat, but a few show strong coupling.
+Most of the priors are relatively flat, but a few show strong coupling. This would allow such trends to appear, if they were present in the data. But in general, the priors assume "no relation" - this is because we want the data to show these relationships - we do not want to bias our analysis via the prior.
