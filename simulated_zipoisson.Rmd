@@ -73,7 +73,7 @@ m1 <- brm(bf(
 summary(m1)
 ```
 
-### Recovering the model parameters
+### Recovering the model parameters (zi-poisson)
 
 ```{r}
 issue_model <- ulam(

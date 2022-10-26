@@ -1,0 +1,134 @@
+---
+title: "Zero-Inflated Poisson - Multilevel model"
+author: "Anders Sundelin"
+date: "2022-10-25"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(rethinking)
+```
+
+## Refresher from chapter 13.2 (simulating tadpoles in ponds)
+```{r}
+a_bar <- 1.5 # overall alpha
+sigma <- 1.5 # overall stddev
+nponds <- 60 # number of ponds, i.e. clusters
+Ni <- as.integer(rep(c(5, 10, 25, 35), each=15))  # integers of initial tadpole counts, one dimension, "long format"
+set.seed(5005)
+a_pond <- rnorm(nponds, mean=a_bar, sd=sigma)  # a value for each pond, comes from the general a_bar population level estimate
+dsim <- data.frame(pond=1:nponds, Ni=Ni, true_a=a_pond) # just for organizing the data - each pond is an own row in the data frame
+
+dsim$Si <- rbinom(nponds, prob=logistic(dsim$true_a), size=dsim$Ni)  # generate simulated survivor count, for each row in the data, using the parameters from that row
+# each individual (dsim$true_a, dsim$Ni) value is used to generate a random survivor count with the appropriate probability of survival and maximum count
+
+dsim$p_nopool <- dsim$Si / dsim$Ni  # proportion of survivors in each pond
+
+dat=list(Si=dsim$Si, Ni=dsim$Ni, pond=dsim$pond)
+m13.3 <- ulam(
+  alist(
+    Si ~ dbinom(Ni, p),
+    logit(p) <- a_pond[pond],
+    a_pond[pond] ~ dnorm(a_bar, sigma),
+    a_bar ~ dnorm(0, 1.5),
+    sigma ~ dexp(1)
+  ), data=dat, chains=4
+)
+
+precis(m13.3, depth=2)
+```
+```{r}
+post <- extract.samples(m13.3)
+dsim$p_partpool <- apply(inv_logit(post$a_pond), 2, mean)
+dsim$p_true <- inv_logit(dsim$true_a)
+
+nopool_error <- abs(dsim$p_nopool - dsim$p_true)
+partpool_error <- abs(dsim$p_partpool - dsim$p_true)
+plot(1:60, nopool_error, xlab="pond", ylab = "absolute error", col=rangi2, pch=16)  # filled blue points
+points(1:60, partpool_error) # varying effects estimates
+
+npool_avg <- aggregate(nopool_error, list(dsim$Ni), mean)
+partpool_avg <- aggregate(partpool_error, list(dsim$Ni), mean)
+```
+
+
+
+## Multilevel Bayesian Model
+```{r init_sim}
+N <- 350
+set.seed(700716)
+
+a_bar <- 1.5
+sigma <- 1.5
+nfiles <- 4
+
+# probability of a event not happening
+# A is likely to be touched, but B is not, C and D also vary a bit...
+prob_untouched <- c(0.2, 0.6, 0.1, 0.4)
+# simulate with more files, just pick uniformly random numbers as probabilities
+#nfiles <- 40
+#prob_untouched <- runif(nfiles)
+
+a_file <- rnorm(nfiles, mean=a_bar, sd=sigma) # value for each file
+dsim <- data.frame(file=1:nfiles, p_untouched=prob_untouched, true_a=a_file)
+
+# The log of the rate is a linear model - rates are always positive
+# Thus, the rate is the exponentiation of the linear model
+# Need to replace 2.4 by the a_file[file], and the .33 with the b_file[file] 
+# The SZ has changes in columns for each file
+# need to figure out how to incorporate the SZ matrix..
+# Right now, the only thing that varies are the alpha - no other metric for the file
+rate_introd <- sapply(1:nfiles, function(i) exp(dsim$true_a[i]))
+
+untouched <- sapply(1:nfiles, function(i) rbinom(N, 1, prob_untouched[i]))
+fileindex <- rep(1:nfiles, each=N)
+
+# simulate issues introduced
+introd <- sapply(1:nfiles, function (i) (1-untouched[,i]) * rpois(N, rate_introd[i]))
+
+# turn the matrix into "long form" (putting the columns after each other, in one long row, matching the fileindex vector above)
+introd_long <- as.vector(introd)
+```
+
+```{r}
+simplehist(introd[,1], xlab="issues introduced in file 1", lwd=4)
+```
+```{r}
+simplehist(introd[,2], xlab="issues introduced in file 2", lwd=4)
+
+```
+
+
+### Recovering the model parameters
+
+```{r}
+issue_model <- ulam(
+  alist(
+    y ~ dzipois(p, lambda),
+    logit(p) <- ap[file], # assume simplest possible model
+    log(lambda) <- al[file], # + bsize * size + bscout * scout,
+    ap[file] ~ dnorm(0, 1.5), # could of course also pull this from the model, if we generate it from a common probability above
+    al[file] ~ dnorm(a_bar, sigma),
+    a_bar ~ dnorm(3, .5),
+    sigma ~ dexp(1)
+#    bsize ~ dnorm(0, 0.4),
+#    bscout ~ dnorm(0, 0.4)
+  ), data=list(y=introd_long, file=fileindex), chains=4)
+```
+
+```{r}
+precis(issue_model, depth=2)
+```
+
+It is extremely important to know how you slice the matrices. Forgetting a comma here and there will completely screw your model...
+```{r}
+post <- extract.samples(issue_model)
+max(sapply(1:4, function(i) abs(mean(inv_logit(post$ap[,i])) - dsim$p_untouched[i])))
+```
+```{r}
+max(sapply(1:4, function(i) abs(mean(post$al[,i]) - dsim$true_a[i])))
+```
+
+The model seems to recover both the probabilities and the alphas quite well.
+However it overestimates a_bar (which we put at 1.5), but put a decent job at finding sigma. Adding more files would presumably help... It does... With 40 files, a_bar becomes 1.69 and sigma stays at 1.40
