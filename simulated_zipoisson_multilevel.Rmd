@@ -60,7 +60,9 @@ N <- 350
 set.seed(700716)
 
 a_bar <- 1.5
-sigma <- 1.5
+sigma_a <- 1.5
+b_bar <- .33
+sigma_b <- 0.1
 nfiles <- 4
 
 # probability of a event not happening
@@ -70,22 +72,29 @@ prob_untouched <- c(0.2, 0.6, 0.1, 0.4)
 #nfiles <- 40
 #prob_untouched <- runif(nfiles)
 
-a_file <- rnorm(nfiles, mean=a_bar, sd=sigma) # value for each file
-dsim <- data.frame(file=1:nfiles, p_untouched=prob_untouched, true_a=a_file)
+a_file <- rnorm(nfiles, mean=a_bar, sd=sigma_a) # value for each file, drawn from the general mean/sd
+b_file <- rnorm(nfiles, mean=b_bar, sd=sigma_b) # ditto for the slope, unique values for each slope
+dsim <- data.frame(file=1:nfiles, p_untouched=prob_untouched, true_a=a_file, true_b=b_file)
+
+# on average, we add 10 rows per week
+change_size <- rnorm(N, 10, 25)
+SZ <- scale(change_size)
 
 # The log of the rate is a linear model - rates are always positive
 # Thus, the rate is the exponentiation of the linear model
-# Need to replace 2.4 by the a_file[file], and the .33 with the b_file[file] 
-# The SZ has changes in columns for each file
-# need to figure out how to incorporate the SZ matrix..
-# Right now, the only thing that varies are the alpha - no other metric for the file
-rate_introd <- sapply(1:nfiles, function(i) exp(dsim$true_a[i]))
+# Replaced the 2.4 by the a_file[file], and the .33 with the b_file[file]
+# Right now, because of the sapply, I run the model on the same SZ for all the files.
+# This is solved later on, where I repeat the SZ as many times as there are files
+# Guess it would be possible to use different initializations for each file, as long as you use the same data when recovering the parameters
+rate_introd <- sapply(1:nfiles, function(i) exp(dsim$true_a[i] + dsim$true_b[i] * SZ))
+# generates a 4-column matrix with 350 rows (because SZ had 350 items)
 
 untouched <- sapply(1:nfiles, function(i) rbinom(N, 1, prob_untouched[i]))
 fileindex <- rep(1:nfiles, each=N)
 
 # simulate issues introduced
-introd <- sapply(1:nfiles, function (i) (1-untouched[,i]) * rpois(N, rate_introd[i]))
+introd <- sapply(1:nfiles, function (i) (1-untouched[,i]) * rpois(N, rate_introd[,i]))
+# generates a 4-column matrix with 350 rows (because the i:th column of rate_introd has 350 items)
 
 # turn the matrix into "long form" (putting the columns after each other, in one long row, matching the fileindex vector above)
 introd_long <- as.vector(introd)
@@ -107,14 +116,15 @@ issue_model <- ulam(
   alist(
     y ~ dzipois(p, lambda),
     logit(p) <- ap[file], # assume simplest possible model
-    log(lambda) <- al[file], # + bsize * size + bscout * scout,
+    log(lambda) <- al[file] + bsize[file] * size, #+ bscout * scout,
     ap[file] ~ dnorm(0, 1.5), # could of course also pull this from the model, if we generate it from a common probability above
-    al[file] ~ dnorm(a_bar, sigma),
+    al[file] ~ dnorm(a_bar, sigma_a),
+    bsize[file] ~ dnorm(b_bar, sigma_b),
     a_bar ~ dnorm(3, .5),
-    sigma ~ dexp(1)
-#    bsize ~ dnorm(0, 0.4),
-#    bscout ~ dnorm(0, 0.4)
-  ), data=list(y=introd_long, file=fileindex), chains=4)
+    sigma_a ~ dexp(1),
+    b_bar ~ dnorm(0, 0.4),
+    sigma_b ~ dexp(1)
+  ), data=list(y=introd_long, file=fileindex, size=rep(SZ, nfiles)), chains=4)
 ```
 
 ```{r}
@@ -124,11 +134,18 @@ precis(issue_model, depth=2)
 It is extremely important to know how you slice the matrices. Forgetting a comma here and there will completely screw your model...
 ```{r}
 post <- extract.samples(issue_model)
-max(sapply(1:4, function(i) abs(mean(inv_logit(post$ap[,i])) - dsim$p_untouched[i])))
+max(sapply(1:nfiles, function(i) abs(mean(inv_logit(post$ap[,i])) - dsim$p_untouched[i])))
 ```
 ```{r}
-max(sapply(1:4, function(i) abs(mean(post$al[,i]) - dsim$true_a[i])))
+max(sapply(1:nfiles, function(i) abs(mean(post$al[,i]) - dsim$true_a[i])))
+```
+```{r}
+max(sapply(1:nfiles, function(i) abs(mean(post$bsize[,i]) - dsim$true_b[i])))
 ```
 
 The model seems to recover both the probabilities and the alphas quite well.
-However it overestimates a_bar (which we put at 1.5), but put a decent job at finding sigma. Adding more files would presumably help... It does... With 40 files, a_bar becomes 1.69 and sigma stays at 1.40
+However it overestimates a_bar (which we put at 1.5), but put a decent job at finding sigma. Adding more files would presumably help... It does... With 40 files, a_bar becomes 1.69 and sigma stays at 1.40. I guess the same goes for b_bar
+
+Question: 
+* In this simulation, I reused the SZ across all files. Does it matter at all? In reality, files have different "change histories" - some change more than others. But as long as I simulate with the data for the particular file, and use the same data when I recover the betas, then everything should work out right, I presume.
+* I guess standardization should work similarly - no point in keeping "separate scales" for the different files. This would make it impossible to make sense of the common b_bar (because the mean and stddev for a new file would be unknown).
