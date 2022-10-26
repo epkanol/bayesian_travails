@@ -26,7 +26,8 @@ scoutiness <- rbinom(N, 10, .66)
 SZ <- (change_size - mean(change_size))/sd(change_size)
 SC <- (scoutiness - mean(scoutiness))/sd(scoutiness)
 
-# need to figure out a better way to represent the positive rate lrnorm?
+# The log of the rate is a linear model - rates are always positive
+# Thus, the rate is the exponentiation of the linear model
 rate_introd <- exp(2.4 + .33 * SZ - SC)
 
 untouched <- rbinom(N, 1, prob_untouched)
@@ -118,9 +119,16 @@ shade(lci, SC_seq, xpd=TRUE)
 Question for my Bayesian buddies, including Prof. Torkar:
 
 * In my analysis, I standardized the data, using the complete data set, then used that data to recover the parameters.
+
+A: That is a first good step to see if your model can recover the basic (ground truth) parameters.
+
 * My hunch is that this introduces a risk of overfitting - making the model trust the data too much.
+
+A: Aah, yes, indeed. The second step could be to do what you propose next below.
+
 * I guess we should have sampled some data, standardized using that dataset, and then run the model on the remainder - akin to ML train/test/validation sets?
 
+A: But remember also that we rely on an epistemological reasoning here, i.e., information theory (LOO). What LOO does is approximating leave-one-out (LOO) CV. It does it remarkably well and the results are very reliable (including the fact that we also get diagnostics w/ LOO). I have over time fallen back on relying more and more on LOO and not focus on scaling the sample and use that before I use the test/validation set.
 
 
 ### Prior selection, incl. plots
