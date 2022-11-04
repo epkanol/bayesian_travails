@@ -1,5 +1,5 @@
 ---
-title: "Zero-Inflated Poisson - Multilevel model"
+title: "Zero-Inflated Poisson - Simple Multilevel model"
 author: "Anders Sundelin"
 date: "2022-10-25"
 output: html_document
@@ -136,9 +136,25 @@ It is extremely important to know how you slice the matrices. Forgetting a comma
 post <- extract.samples(issue_model)
 max(sapply(1:nfiles, function(i) abs(mean(inv_logit(post$ap[,i])) - dsim$p_untouched[i])))
 ```
+Derived probabilities of changing (to be compared with the real values, 0.2, 0.6, 0.1 and 0.4)
+```{r}
+sapply(1:nfiles, function(i) mean(inv_logit(post$ap[,i])))
+```
+
+Derived intercepts (to be compared with the real values, 1.71, 1.43, 3.28 and 0.75)
+```{r}
+sapply(1:nfiles, function(i) mean(post$al[,i]))
+```
 ```{r}
 max(sapply(1:nfiles, function(i) abs(mean(post$al[,i]) - dsim$true_a[i])))
 ```
+
+Derived slopes (to be compared with the real values, 0.42, 0.09, 0.27 and 0.53)
+```{r}
+sapply(1:nfiles, function(i) mean(post$bsize[,i]))
+```
+
+
 ```{r}
 max(sapply(1:nfiles, function(i) abs(mean(post$bsize[,i]) - dsim$true_b[i])))
 ```
@@ -148,4 +164,6 @@ However it overestimates a_bar (which we put at 1.5), but put a decent job at fi
 
 Question: 
 * In this simulation, I reused the SZ across all files. Does it matter at all? In reality, files have different "change histories" - some change more than others. But as long as I simulate with the data for the particular file, and use the same data when I recover the betas, then everything should work out right, I presume.
+A: Yes, it is OK to reuse SZ across files, even though in reality files will have different change histories.
 * I guess standardization should work similarly - no point in keeping "separate scales" for the different files. This would make it impossible to make sense of the common b_bar (because the mean and stddev for a new file would be unknown).
+A: Yes, standardization would have to be made same way for all files. As long as you keep to one, single measurement scale, what unit it is in is does not affect the simulation (except for numerical accuracy issues of course). Just don't forget to use the same scale when interpreting the results.
