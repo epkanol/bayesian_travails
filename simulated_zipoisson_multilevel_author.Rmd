@@ -210,7 +210,59 @@ issue_model <- ulam(
     sigma_b ~ dexp(1),
     bauth_bar ~ dnorm(0, 0.2),
     sigma_bauth ~ dexp(1)
-  ), data=d, chains=4, cores = 4)
+  ), data=d, chains=4, iter = 5e3, cores = 4)
+```
+```{r}
+library(brms)
+library(bayesplot)
+library(ggplot2)
+
+d$file_f <- as.factor(d$file)
+d$author_f <- as.factor(d$author)
+
+p <- get_prior(bf(y ~ 1 + author_impact + size + (1 | file_f) + (1 | author_f),
+                  shape ~ 1 + author_impact + size + (1 | file_f) + (1 | author_f),
+                  zi ~ 1 + author_impact + size + (1 | file_f) + (1 | author_f)),
+                  family = zero_inflated_negbinomial(), data = d)
+
+p[c(1, 10, 19), 1] <- "normal(0,1)"
+p[c(4, 13, 22), 1] <- "normal(0,2.5)"
+p[c(5, 14, 23), 1] <- "weibull(2,1)"
+
+# Only estimating overall intercept for the zi part
+m <- brm(bf(y ~ 1 + author_impact + size + (1 | file_f) + (1 | author_f),
+            #it seems shape needs to have predictors!
+            shape ~ 1 + author_impact + size + (1 | file_f) + (1 | author_f),
+            zi ~ 1 + author_impact + size + (1 | file_f) + (1 | author_f)),
+            prior = p,
+            # sample_prior = "only", # if you want to check that priors are sane
+            family = zero_inflated_negbinomial(),
+            data = d, control = list(adapt_delta = 0.95))
+
+summary(m)
+
+# draw from posterior
+yrep_zinb <- posterior_predict(m)
+
+# proportions of zeros
+ppc_stat(y = d$y, yrep_zinb, stat = function(y) mean(y == 0))
+
+# max count PPC for zero-inflated negative-binomial model
+# slightly off, but OKish
+ppc_stat(y = d$y, yrep_zinb, stat = "max")
+
+pp_check(m, type = "bars") + ylim(0, 60) + xlim(1, 40)
+plot(conditional_effects(m), ask = FALSE)
+
+# beta params?
+mcmc_areas(m, regex_pars = c("^b_auth", "^b_si"))
+
+# sd
+mcmc_areas(m, pars = c("sd_author_f__Intercept",
+                       "sd_file_f__Intercept"))
+
+# remember, y is log() and zi is logit()!
+summary(m)
 ```
 
 ```{r}
