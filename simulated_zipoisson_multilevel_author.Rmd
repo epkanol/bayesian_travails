@@ -263,6 +263,9 @@ mcmc_areas(m, pars = c("sd_author_f__Intercept",
 
 # remember, y is log() and zi is logit()!
 summary(m)
+
+# Estimations per file/author
+ranef(m)
 ```
 
 ```{r}
