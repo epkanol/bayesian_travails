@@ -60,14 +60,14 @@ N <- 50  # weeks/commits of sampling
 set.seed(700716)
 
 a_bar <- 3.14
-sigma_a <- 0.5
-b_bar <- .4
-sigma_b <- 0.3
+sigma_a <- 0.15
+b_bar <- .04
+sigma_b <- 0.01
 nfiles <- 5
 nauthors <- 7
 
-bauthor_bar <- 0.33
-sigma_bauthor <- 0.3
+bauthor_bar <- 0.033
+sigma_bauthor <- 0.01
 
 # probability of a event not happening
 # A is likely to be touched, but B is not, C, D and E also vary a bit...
@@ -123,6 +123,14 @@ introd <- sapply(1:length(file_observation), function (i) (1-untouched[i]) * rpo
 # assemble the data frame
 df <- data.frame(introd=introd, file=file_observation, size=SZ, author=AUTHORS, author_impact=AI)
 ```
+
+Check that the poisson process is visible in the data, after the zeros have been removed (check for sanity of the betas and alpha). 
+In particular, if a Poisson model should be useful, the mean and variance ($s^2$) of the outcome should be roughly equal (at least same order of magnitude). Otherwise we have to use a zero-inflated negative binomial (see below brms example by R. Torkar)
+
+```{r}
+df %>% filter(introd > 0) %>% summarise(mean(introd), var=sd(introd)^2)
+```
+
 
 ```{r}
 simplehist(df %>% filter(file == 1) %>% select(introd), xlab="issues introduced in file 1", lwd=4)
@@ -213,83 +221,6 @@ issue_model <- ulam(
   ), data=d, chains=4, iter = 5e3, cores = 4)
 ```
 
-A quick'n dirty comparison of two general intercept models.
-
-```{r}
-library(brms)
-library(bayesplot)
-library(ggplot2)
-
-m_pois <- brm(bf(y ~ 1, zi ~ 1),
-                family = zero_inflated_poisson(),
-                data = d, chains = 4, cores = 4)
-
-m_nb <- brm(bf(y ~ 1, zi ~ 1),
-                family = zero_inflated_negbinomial(),
-                data = d, chains = 4, cores = 4)
-
-loo_pois <- loo(m_pois) # warning that we need to check
-loo_nb <- loo(m_nb) # no warning
-ll <- loo_compare(loo_pois, loo_nb)
-
-ll
-
-# In short, the NB model is very much prefered
-# assuming a z-score of 1.96, i.e. 95%
-ll[2, 1] + c(-1, 1) * 1.96 * ll[2, 2]
-
-```
-
-```{r}
-d$file_f <- as.factor(d$file)
-d$author_f <- as.factor(d$author)
-
-p <- get_prior(bf(y ~ 1 + author_impact + size + (1 | file_f) + (1 | author_f),
-                  shape ~ 1 + author_impact + size + (1 | file_f) + (1 | author_f),
-                  zi ~ 1 + author_impact + size + (1 | file_f) + (1 | author_f)),
-                  family = zero_inflated_negbinomial(), data = d)
-
-p[c(1, 10, 19), 1] <- "normal(0,1)"
-p[c(4, 13, 22), 1] <- "normal(0,2.5)"
-p[c(5, 14, 23), 1] <- "weibull(2,1)"
-
-# Only estimating overall intercept for the zi part
-m <- brm(bf(y ~ 1 + author_impact + size + (1 | file_f) + (1 | author_f),
-            #it seems shape needs to have predictors!
-            shape ~ 1 + author_impact + size + (1 | file_f) + (1 | author_f),
-            zi ~ 1 + author_impact + size + (1 | file_f) + (1 | author_f)),
-            prior = p,
-            # sample_prior = "only", # if you want to check that priors are sane
-            family = zero_inflated_negbinomial(),
-            data = d, control = list(adapt_delta = 0.95))
-
-# draw from posterior
-yrep_zinb <- posterior_predict(m)
-
-# proportions of zeros
-ppc_stat(y = d$y, yrep_zinb, stat = function(y) mean(y == 0))
-
-# max count PPC for zero-inflated negative-binomial model
-# slightly off, but OKish
-ppc_stat(y = d$y, yrep_zinb, stat = "max")
-
-pp_check(m, type = "bars") + ylim(0, 60) + xlim(1, 20)
-plot(conditional_effects(m), ask = FALSE)
-
-# beta params?
-mcmc_areas(m, regex_pars = c("^b_auth", "^b_si"))
-
-# sd
-mcmc_areas(m, pars = c("sd_author_f__Intercept",
-                       "sd_file_f__Intercept"))
-
-# remember, y is log() and zi is logit()!
-summary(m)
-
-# Estimations per file/author
-ranef(m)
-```
-
 ```{r}
 precis(issue_model, depth=2)
 ```
@@ -297,7 +228,6 @@ precis(issue_model, depth=2)
 ```{r}
 plot(issue_model, depth=2)
 ```
-
 
 It is extremely important to know how you slice the matrices. Forgetting a comma here and there will completely screw your model...
 
@@ -378,6 +308,109 @@ sigma_bauthor is very closely fitted, right in the middle of the estimated inter
 c(bauthor_bar, mean(post$bauth_bar), PI(post$bauth_bar))
 c(sigma_bauthor, mean(post$sigma_bauth), PI(post$sigma_bauth))
 ```
+
+
+# Using brms and neg-binomial
+
+Contribution from Richard Torkar - using brms and ggplot instead, with the zero-inflated negative binomial distribution.
+An amazing _conversion_ of Statistical Rethinking into the `brms` world is available here: https://bookdown.org/content/4857/ (with source code https://github.com/ASKurz/Statistical_Rethinking_with_brms_ggplot2_and_the_tidyverse_2_ed).
+
+
+## Comparing using general intercept models
+
+A quick'n dirty comparison of two general intercept models.
+
+```{r}
+library(brms)
+library(bayesplot)
+library(ggplot2)
+
+m_pois <- brm(bf(y ~ 1, zi ~ 1),
+                family = zero_inflated_poisson(), save_pars = save_pars(all=T),
+                data = d, chains = 4, cores = 4)
+
+m_nb <- brm(bf(y ~ 1, zi ~ 1),
+                family = zero_inflated_negbinomial(),
+                data = d, chains = 4, cores = 4)
+
+```
+```{r}
+loo_pois <- loo(m_pois, moment_match = TRUE) # warning about pareto_k > 0.7 that we need to check
+```
+
+```{r}
+
+loo_nb <- loo(m_nb) # no warning
+ll <- loo_compare(loo_pois, loo_nb)
+
+ll
+
+# In short, the NB model is very much prefered
+# assuming a z-score of 1.96, i.e. 95%
+ll[2, 1] + c(-1, 1) * 1.96 * ll[2, 2]
+
+```
+
+
+
+```{r}
+d$file_f <- as.factor(d$file)
+d$author_f <- as.factor(d$author)
+
+p <- get_prior(bf(y ~ 1 + author_impact + size + (1 | file_f) + (1 | author_f),
+                  shape ~ 1 + author_impact + size + (1 | file_f) + (1 | author_f),
+                  zi ~ 1 + author_impact + size + (1 | file_f) + (1 | author_f)),
+                  family = zero_inflated_negbinomial(), data = d)
+
+p[c(1, 10, 19), 1] <- "normal(0,1)"
+p[c(4, 13, 22), 1] <- "normal(0,2.5)"
+p[c(5, 14, 23), 1] <- "weibull(2,1)"
+
+# Only estimating overall intercept for the zi part
+m <- brm(bf(y ~ 1 + author_impact + size + (1 | file_f) + (1 | author_f),
+            #it seems shape needs to have predictors!
+            shape ~ 1 + author_impact + size + (1 | file_f) + (1 | author_f),
+            zi ~ 1 + author_impact + size + (1 | file_f) + (1 | author_f)),
+            prior = p,
+            # sample_prior = "only", # if you want to check that priors are sane
+            family = zero_inflated_negbinomial(),
+            data = d, control = list(adapt_delta = 0.95))
+
+# draw from posterior
+yrep_zinb <- posterior_predict(m)
+
+# proportions of zeros
+ppc_stat(y = d$y, yrep_zinb, stat = function(y) mean(y == 0))
+
+# max count PPC for zero-inflated negative-binomial model
+# slightly off, but OKish
+ppc_stat(y = d$y, yrep_zinb, stat = "max")
+
+pp_check(m, type = "bars") + ylim(0, 20) + xlim(1, 20)
+plot(conditional_effects(m), ask = FALSE)
+
+# beta params?
+mcmc_areas(m, regex_pars = c("^b_auth", "^b_si"))
+
+# sd
+mcmc_areas(m, pars = c("sd_author_f__Intercept",
+                       "sd_file_f__Intercept"))
+
+# remember, y is log() and zi is logit()!
+summary(m)
+
+# Estimations per file/author
+ranef(m)
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
 
 Questions:
 
