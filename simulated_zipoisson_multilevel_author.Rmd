@@ -212,11 +212,35 @@ issue_model <- ulam(
     sigma_bauth ~ dexp(1)
   ), data=d, chains=4, iter = 5e3, cores = 4)
 ```
+
+A quick'n dirty comparison of two general intercept models.
+
 ```{r}
 library(brms)
 library(bayesplot)
 library(ggplot2)
 
+m_pois <- brm(bf(y ~ 1, zi ~ 1),
+                family = zero_inflated_poisson(),
+                data = d, chains = 4, cores = 4)
+
+m_nb <- brm(bf(y ~ 1, zi ~ 1),
+                family = zero_inflated_negbinomial(),
+                data = d, chains = 4, cores = 4)
+
+loo_pois <- loo(m_pois) # warning that we need to check
+loo_nb <- loo(m_nb) # no warning
+ll <- loo_compare(loo_pois, loo_nb)
+
+ll
+
+# In short, the NB model is very much prefered
+# assuming a z-score of 1.96, i.e. 95%
+ll[2, 1] + c(-1, 1) * 1.96 * ll[2, 2]
+
+```
+
+```{r}
 d$file_f <- as.factor(d$file)
 d$author_f <- as.factor(d$author)
 
@@ -249,7 +273,7 @@ ppc_stat(y = d$y, yrep_zinb, stat = function(y) mean(y == 0))
 # slightly off, but OKish
 ppc_stat(y = d$y, yrep_zinb, stat = "max")
 
-pp_check(m, type = "bars") + ylim(0, 60) + xlim(1, 40)
+pp_check(m, type = "bars") + ylim(0, 60) + xlim(1, 20)
 plot(conditional_effects(m), ask = FALSE)
 
 # beta params?
