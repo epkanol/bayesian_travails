@@ -239,8 +239,6 @@ m <- brm(bf(y ~ 1 + author_impact + size + (1 | file_f) + (1 | author_f),
             family = zero_inflated_negbinomial(),
             data = d, control = list(adapt_delta = 0.95))
 
-summary(m)
-
 # draw from posterior
 yrep_zinb <- posterior_predict(m)
 
