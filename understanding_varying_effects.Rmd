@@ -1,0 +1,201 @@
+---
+title: "Understanding varying effects"
+author: "Anders Sundelin"
+date: "2022-12-06"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(ggcorrplot)
+library(tidyr)
+library(dplyr)
+library(rethinking)
+library(dagitty)
+library(stringr)
+```
+
+## Varying Effects
+
+RQ: How does authors and teams interact when initiating or fixing issues in code?
+
+```{r ingest}
+df <- read.csv("samples/authors-team-impact.csv")
+summary(df)
+```
+
+### Scaling
+
+The data in the csv is not scaled yet.
+
+Rather than scaling from the data which we are going to derive inferences from, we pick some commit from the repo (semi-random), and calculate the scale that we are mostly going to use.
+
+This gives the following measurement scales:
+```{r}
+scale_cloc      <- data.frame(t(c(count=1771, mean=123.6285, stddev=303.9526, median=56)))
+scale_mccabe    <- data.frame(t(c(count=1771, mean=13.70073, stddev=40.93051, median=5)))
+scale_duplines  <- data.frame(t(c(count=1771, mean=18.04743, stddev=59.00211, median=0)))
+scale_dupblocks <- data.frame(t(c(count=1771, mean=0.9994353, stddev=3.071005, median=0)))
+```
+
+For added and removed lines, we have to use the data we have
+
+```{r}
+scale_added <- df %>% summarize(count=n(), mean=mean(added), stddev=sd(added), median=median(added))
+scale_removed <- df %>% summarize(count=n(), mean=mean(removed), stddev=sd(removed), median=median(removed))
+```
+
+We can play around with two different scaling methods - either we center the new scale around the mean value (making it into a N(0,1) distribution), or we let the original zero keep its semantics (e.g. zero added lines), and just divide the metric by the standard deviation.
+
+```{r}
+data_centered <- df %>% mutate(file=fileid, author=authorid, team=authorteamid, 
+                               ADD=(added-scale_added$mean)/scale_added$stddev, 
+                               DEL=(removed-scale_removed$mean)/scale_removed$stddev, 
+                               CLOC=(currCloc-scale_cloc$mean)/scale_cloc$stddev, 
+                               COMPLEX=(currComplex-scale_mccabe$mean)/scale_mccabe$stddev, 
+                               DUP=(prevDupBlocks-scale_dupblocks$mean)/scale_dupblocks$stddev,
+                               INTROD=if_else(delta >= 0, delta, as.integer(0)),
+                               REMOVED=if_else(delta <= 0, delta, as.integer(0)),
+                               y=INTROD) %>%
+  select(file, author, team, ADD, DUP, y)
+
+data_scaled <- df %>% mutate(file=fileid, author=authorid, team=authorteamid, 
+                             ADD=(added)/scale_added$stddev, 
+                             DEL=(removed)/scale_removed$stddev, 
+                             CLOC=(currCloc)/scale_cloc$stddev, 
+                             COMPLEX=(currComplex)/scale_mccabe$stddev, 
+                             DUP=(prevDupBlocks)/scale_dupblocks$stddev, 
+                             INTROD=if_else(delta >= 0, delta, as.integer(0)),
+                             REMOVED=if_else(delta <= 0, delta, as.integer(0)),
+                             y=INTROD) %>%
+  select(file, author, team, ADD, DUP, y)
+data <- data_scaled
+
+```
+
+
+
+
+## Modeling 
+
+We suspect that the author, but also the team where the author resides, have an impact on the number of issues introduced.
+
+We build a model for introduced issues first
+
+Sanity checking the mean and variance (is Poisson even likely?). 
+```{r}
+data %>% summarize(count=n(), mean(y), sd(y))
+```
+They are not particularly similar, so a regular Poisson will not do. But if we remove the zeros (which will be handled by the zero-inflation part)?
+
+```{r}
+data %>% filter(y > 0) %>% summarize(count=n(), mean(y), sd(y))
+```
+These values at least are roughly similar, so let's see if we can make the model work
+
+```{r}
+issue_model <- ulam(
+  alist(
+    y ~ dzipois(p, lambda),
+    logit(p) <- ap + bpdup * DUP + bpadd * ADD, 
+    log(lambda) <- alpha[author,team] + badd * ADD, 
+
+    # adaptive, non-centered priors - we have 11 teams
+    transpars> matrix[author,11]:alpha <- compose_noncentered(sigma_author, L_Rho_author, z_author),
+    matrix[11, author]:z_author ~ normal(0, 1),
+    
+    ap ~ dnorm(0, 1.5),
+    bpdup ~ dnorm(0, 0.2),
+    bpadd ~ dnorm(0, 0.2),
+    badd ~ dnorm(0, 0.2),
+#    al[team] ~ dnorm(2.5, 0.7),
+    vector[11]:sigma_author ~ dexp(1),
+    cholesky_factor_corr[11]:L_Rho_author ~ lkj_corr_cholesky(2),
+    # compute ordinary correlation matrixes from Cholesky factors
+    gq> matrix[11,11]:Rho_author <<- Chol_to_Corr(L_Rho_author)
+  ), data=data, chains=4, iter = 1e3, cores=4, log_lik = T)
+```
+
+
+```{r precis}
+precis(issue_model)
+```
+
+```{r}
+precis(issue_model, depth=2)
+```
+
+Lots of NaN in the correlation matrix (L_Rho_author) - is this because authors generally stick to a single team?
+
+```{r}
+precis(issue_model, depth=3)
+```
+
+## Interpreting the results
+
+```{r}
+post <- extract.samples(issue_model)
+mean(inv_logit(post$ap))
+PI(inv_logit(post$ap))
+
+```
+
+The zero-inflation part can be understood in the scale of the standard deviations of existing duplications, and the number of added lines.
+The intercept means that the model is 94-95% certain that if there are no (0) added lines, and no existing duplications in a file, there will be no added duplicates in that change. Seems reasonable, but the question is how much impact the existing duplications and the number of added lines have?
+
+```{r}
+p_link <- function(xdup, xadd) {
+  logodds <- (post$ap + xdup*post$bpdup + xadd*post$bpadd)
+  return(inv_logit(logodds))
+}
+x <- seq(0, 15, length.out=100)
+p_raw <- sapply(x, function(i) p_link(i, 0))
+p_mu <- apply(p_raw, 2, mean)
+p_ci <- apply(p_raw, 2, PI)
+
+plot(NULL, xlab="existing DUP-licated blocks (stddev units, 1=3.07 blocks)", ylim=c(0.5,1), xlim=c(0,15))
+lines(x, p_mu)
+shade(p_ci, x)
+```
+
+Similarly for the number of added lines
+
+```{r}
+x <- seq(0, 9, length.out=100)
+p_raw <- sapply(x, function(i) p_link(0, i))
+p_mu <- apply(p_raw, 2, mean)
+p_ci <- apply(p_raw, 2, PI)
+
+plot(NULL, xlab="ADD-ed lines (stddev units, 1=68.5 lines)", ylim=c(0,1), xlim=c(0,9))
+lines(x, p_mu)
+shade(p_ci, x)
+
+```
+
+Question: This is just a simple example, where an intercept is tied to an author/team combination.
+But the data is scarce, because there is not much movement amongst authors.
+In general, I would like to collect a distribution for each team - I suspect that is what the matrices are doing. But I am not used to dealing with matrices that contain NaN - how do I interpret these?
+
+## Model checking
+
+We do have some outliers
+
+```{r}
+WAIC(issue_model)
+```
+
+```{r}
+PSIS(issue_model)
+```
+Some Pareto k values are high - indicating that we need to refine our model to explain the outliers.
+
+Plotting the results
+```{r}
+set.seed(1234567)
+PSIS_issue <- PSIS(issue_model, pointwise = TRUE)
+set.seed(1234567)
+WAIC_issue <- WAIC(issue_model, pointwise = TRUE)
+plot(PSIS_issue$k, WAIC_issue$penalty, xlab="PSIS Pareto k", ylab="WAIC penalty", col=rangi2, lwd=2)
+```
+
