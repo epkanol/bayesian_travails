@@ -69,11 +69,22 @@ data %>% filter(y > 0) %>% summarize(count = n(), mean(y), sd(y))
 #                 prior(exponential(1), class = sd),
 #                 prior(lkj(2), class = cor)),
 #       chains = 4, cores = 4, threads = threading(2), sample_prior = "only")
-#
+
 # A model where each team gets an intercept, and then we have individual slopes
 # for each author (in each team) (varying effects model)
 # I have 8 cores so I run two threads on each core with: threads = threading(2)
 m_nb <-
+  brm(data = data,
+      family = zero_inflated_negbinomial,
+      y ~ 0 + author + (1 + author | team),
+      prior = c(prior(normal(0, 0.5), class = b),
+                prior(weibull(2, 1), class = sd),
+                prior(lkj(2), class = cor),
+                prior(beta(1, 1), class = zi),
+                prior(gamma(0.01, 0.01), class = shape)),
+      chains = 4, cores = 4, threads = threading(2))
+
+m_nb_add_dup <-
   brm(data = data,
       family = zero_inflated_negbinomial,
       y ~ 0 + author + (1 + author | team) + ADD + DUP, # fix
@@ -82,55 +93,54 @@ m_nb <-
                 prior(lkj(2), class = cor),
                 prior(beta(1, 1), class = zi),
                 prior(gamma(0.01, 0.01), class = shape)),
-      chains = 4, cores = 4, threads = threading(2))
+      chains = 4, cores = 4, threads = threading(2), adapt_delta = 0.95)
 
-# Output:
-#  Family: zero_inflated_negbinomial 
-#   Links: mu = log; shape = identity; zi = identity 
-# Formula: y ~ 0 + author + (0 + author | team) 
-#    Data: data (Number of observations: 9413) 
-#   Draws: 4 chains, each with iter = 2000; warmup = 1000; thin = 1;
-#          total post-warmup draws = 4000
+m_nb <- add_criterion(m_nb, criterion = "loo")
+m_nb_add_dup <- add_criterion(m_nb_add_dup, criterion = "loo")
+loo_compare(m_nb, m_nb_add_dup)
+# Clearly adding ADD and DUP has great effect.
 
+M <- m_nb_add_dup
+
+# Output of M
 # Group-Level Effects: 
 # ~team (Number of levels: 11) 
-#            Estimate Est.Error l-95% CI u-95% CI Rhat Bulk_ESS Tail_ESS
-# sd(author)     0.01      0.01     0.01     0.03 1.00     1371     1836
+#                       Estimate Est.Error l-95% CI u-95% CI Rhat Bulk_ESS Tail_ESS
+# sd(Intercept)             2.42      0.31     1.87     3.10 1.00      847     1466
+# sd(author)                0.04      0.01     0.02     0.07 1.00     1107     1726
+# cor(Intercept,author)    -0.81      0.23    -0.98    -0.09 1.00     1137     1841
 
 # Population-Level Effects: 
 #        Estimate Est.Error l-95% CI u-95% CI Rhat Bulk_ESS Tail_ESS
-# author    -0.02      0.01    -0.03    -0.01 1.00     1340     1944
+# author    -0.05      0.02    -0.09    -0.01 1.00      933     1562
+# ADD        1.17      0.06     1.05     1.30 1.00     4831     3183
+# DUP        0.21      0.02     0.17     0.26 1.00     4586     2467
 
 # Family Specific Parameters: 
 #       Estimate Est.Error l-95% CI u-95% CI Rhat Bulk_ESS Tail_ESS
-# shape     0.21      0.03     0.15     0.28 1.00     2430     2234
-# zi        0.76      0.03     0.70     0.80 1.00     2288     2373
-
-# Draws were sampled using sample(hmc). For each parameter, Bulk_ESS
-# and Tail_ESS are effective sample size measures, and Rhat is the potential
-# scale reduction factor on split chains (at convergence, Rhat = 1).
+# shape     0.12      0.01     0.10     0.14 1.00     4518     3329
+# zi        0.03      0.02     0.00     0.09 1.00     2850     1992
 
 # Diagnostics
-stopifnot(rhat(m_nb) < 1.01)
-stopifnot(neff_ratio(m_nb) > 0.20)
-mcmc_trace(m_nb) # ok
-np <- nuts_params(m_nb)
-lp <- log_posterior(m_nb)
+stopifnot(rhat(M) < 1.01)
+stopifnot(neff_ratio(M) > 0.20)
+mcmc_trace(M) # ok
+np <- nuts_params(M)
+lp <- log_posterior(M)
 mcmc_nuts_divergence(np, lp) # ok
-loo(m_nb) # ok
+loo(M) # ok
 
-# Check our prior v. posterior concerning cor
 # check how the posterior for the correlation of the random effects
 # compares to prior
-post <- as_draws_df(m_nb)
+post <- as_draws_df(M)
 
 # we used lkj(2)
 r_2 <-
   rlkjcorr(1e4, K = 2, eta = 2) |>
   data.frame()
 
-# # plot and compare
-# # fairly strong negative correlations, and data has told its story
+# plot and compare
+# fairly strong negative correlations, and data has told its story
 post %>%
       ggplot() +
       geom_density(data = r_2, aes(x = X2),
@@ -148,11 +158,13 @@ post %>%
 # story
 
 # How does the variance differ bw team and author?
-mcmc_areas_ridges(m_nb, regex_pars = "sd_team__")
+mcmc_areas_ridges(M, regex_pars = "sd_team__")
 
 # between teams and authors?
-mcmc_areas_ridges(m_nb, pars = c("r_team[1,author]","r_team[2,author]","r_team[3,author]", "r_team[4,author]","r_team[5,author]","r_team[6,author]","r_team[7,author]","r_team[8,author]","r_team[9,author]","r_team[10,author]","r_team[11,author]"), prob = 0.95)
+mcmc_areas_ridges(M, pars = c("r_team[1,author]","r_team[2,author]","r_team[3,author]", "r_team[4,author]","r_team[5,author]","r_team[6,author]","r_team[7,author]","r_team[8,author]","r_team[9,author]","r_team[10,author]","r_team[11,author]"), prob = 0.95)
 
 # between teams
-mcmc_areas_ridges(m_nb, pars = c("r_team[1,Intercept]","r_team[2,Intercept]","r_team[3,Intercept]","r_team[4,Intercept]","r_team[5,Intercept]","r_team[6,Intercept]","r_team[7,Intercept]","r_team[8,Intercept]","r_team[9,Intercept]","r_team[10,Intercept]",
+mcmc_areas_ridges(M, pars = c("r_team[1,Intercept]","r_team[2,Intercept]","r_team[3,Intercept]","r_team[4,Intercept]","r_team[5,Intercept]","r_team[6,Intercept]","r_team[7,Intercept]","r_team[8,Intercept]","r_team[9,Intercept]","r_team[10,Intercept]",
     "r_team[11,Intercept]"), prob = 0.95)
+
+mcmc_areas_ridges(M, regex_pars = "^b_")
