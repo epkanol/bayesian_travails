@@ -92,28 +92,166 @@ They are not particularly similar, so a regular Poisson will not do. But if we r
 ```{r}
 data %>% filter(y > 0) %>% summarize(count=n(), mean(y), sd(y))
 ```
+
 These values at least are roughly similar, so let's see if we can make the model work
 
+### Intercept by team, slope per author
+
+If we _assume_ that teams and authors are independent, we could give each team their own intercept, and each author their slope.
+
 ```{r}
+set.seed(123456)
+issue_model_intercept_team <- ulam(
+  alist(
+    y ~ dzipois(p, lambda),
+    logit(p) <- ap + bpdup * DUP + bpadd * ADD,
+    log(lambda) <- alpha[team] + badd[author] * ADD,
+    ap ~ dnorm(0, 1.5),
+    bpdup ~ dnorm(0, 0.2),
+    bpadd ~ dnorm(0, 0.2),
+    alpha[team] ~ dnorm(alpha_team_bar, sigma_team),
+    badd[author] ~ dnorm(badd_author_bar, sigma_author),
+    alpha_team_bar ~ dnorm(2.5, 0.7),
+    sigma_team ~ dexp(1),
+    badd_author_bar ~ dnorm(0, 0.2),
+    sigma_author ~ dexp(1)
+  ), data=data, chains=4, iter=1e3, cores=4, log_lik = TRUE)
+```
+
+```{r}
+precis(issue_model_intercept_team)
+```
+
+```{r}
+precis(issue_model_intercept_team, depth=2)
+```
+
+```{r}
+WAIC(issue_model_intercept_team)
+```
+
+```{r}
+PSIS(issue_model_intercept_team)
+```
+
+
+
+So, we see some impact from the teams (pooled mean and stddev around 0.3-0.4).
+Slope for the authors have few "clear patterns" - some, like badd[2], badd[10] have means over 0.2, and some, like badd[12] have means less than -0.25. But most of the author slopes have no clear pattern, which is shown in the pooled mean close to 0, and their CI widely spread over 0.
+
+### Intercept per author, slope per team
+
+Trying the opposite approach - slope per team and intercept per author
+
+```{r}
+set.seed(123456)
+issue_model_intercept_author <- ulam(
+  alist(
+    y ~ dzipois(p, lambda),
+    logit(p) <- ap + bpdup * DUP + bpadd * ADD,
+    log(lambda) <- alpha[author] + badd[team] * ADD,
+    ap ~ dnorm(0, 1.5),
+    bpdup ~ dnorm(0, 0.2),
+    bpadd ~ dnorm(0, 0.2),
+    alpha[author] ~ dnorm(alpha_author_bar, sigma_author),
+    badd[team] ~ dnorm(badd_team_bar, sigma_team),
+    alpha_author_bar ~ dnorm(2.5, 0.7),
+    badd_team_bar ~ dnorm(0, 0.2),
+    sigma_team ~ dexp(1),
+    sigma_author ~ dexp(1)
+  ), data=data, chains=4, iter=1e3, cores=4, log_lik = TRUE)
+
+```
+
+```{r}
+precis(issue_model_intercept_author)
+```
+
+```{r}
+precis(issue_model_intercept_author, depth=2)
+```
+
+The pattern repeats, in reverse. The intercepts per author lie around 0, with a wide Compatibility Interval. And the mean slope for the teams seems to lie around 0.2, plus or minus 0.1.
+
+Does this mean that we do not have enough author data to make firm conclusions?
+We do have some conclusions, for instance alpha[6] have a mean of -2.47, and alpha[12] have a mean of -1.88.
+
+```{r}
+WAIC(issue_model_intercept_author)
+```
+
+```{r}
+PSIS(issue_model_intercept_author)
+```
+
+### Ignoring teams and authors
+
+What happens if we just give up, and ignore teams and authors altogether?
+
+```{r}
+set.seed(123456)
+issue_model_global_intercept <- ulam(
+  alist(
+    y ~ dzipois(p, lambda),
+    logit(p) <- ap + bpdup * DUP + bpadd * ADD,
+    log(lambda) <- alpha + badd * ADD,
+    ap ~ dnorm(0, 1.5),
+    bpdup ~ dnorm(0, 0.2),
+    bpadd ~ dnorm(0, 0.2),
+    alpha ~ dnorm(2.5, 0.7),
+    badd ~ dnorm(0, 0.2)
+  ), data=data, chains=4, iter=1e3, cores=4, log_lik = TRUE)
+```
+
+
+```{r}
+WAIC(issue_model_global_intercept)
+```
+
+```{r}
+PSIS(issue_model_global_intercept)
+```
+
+### Comparing the three approaches
+
+```{r}
+compare(issue_model_global_intercept, issue_model_intercept_author, issue_model_intercept_team, func=WAIC)
+```
+
+```{r}
+compare(issue_model_global_intercept, issue_model_intercept_author, issue_model_intercept_team, func=PSIS)
+```
+
+Although we have outliers with high Pareto k values, both PSIS and WAIC agree that the model that performed the best was the one where the authors decided the intercept, and the team controlled the slope.
+
+Can we sort out the correlation between authors and teams via varying effects?
+
+## Varying effects (Chapter 14)
+
+```{r}
+set.seed(123456)
 issue_model <- ulam(
   alist(
     y ~ dzipois(p, lambda),
     logit(p) <- ap + bpdup * DUP + bpadd * ADD, 
-    log(lambda) <- alpha[author,team] + badd * ADD, 
+    log(lambda) <- alpha[author,team] + badd[author,team] * ADD, 
 
     # adaptive, non-centered priors - we have 11 teams
     transpars> matrix[author,11]:alpha <- compose_noncentered(sigma_author, L_Rho_author, z_author),
+    transpars> matrix[author,11]:badd <- compose_noncentered(sigma_badd, L_Rho_badd, z_badd),
     matrix[11, author]:z_author ~ normal(0, 1),
+    matrix[11, author]:z_badd ~ normal(0, 1),
     
     ap ~ dnorm(0, 1.5),
     bpdup ~ dnorm(0, 0.2),
     bpadd ~ dnorm(0, 0.2),
-    badd ~ dnorm(0, 0.2),
-#    al[team] ~ dnorm(2.5, 0.7),
     vector[11]:sigma_author ~ dexp(1),
+    vector[11]:sigma_badd ~ dexp(1),
     cholesky_factor_corr[11]:L_Rho_author ~ lkj_corr_cholesky(2),
+    cholesky_factor_corr[11]:L_Rho_badd ~ lkj_corr_cholesky(2),
     # compute ordinary correlation matrixes from Cholesky factors
-    gq> matrix[11,11]:Rho_author <<- Chol_to_Corr(L_Rho_author)
+    gq> matrix[11,11]:Rho_author <<- Chol_to_Corr(L_Rho_author),
+    gq> matrix[11,11]:Rho_badd <<- Chol_to_Corr(L_Rho_badd)
   ), data=data, chains=4, iter = 1e3, cores=4, log_lik = T)
 ```
 
