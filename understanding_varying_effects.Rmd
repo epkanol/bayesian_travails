@@ -234,24 +234,21 @@ issue_model <- ulam(
   alist(
     y ~ dzipois(p, lambda),
     logit(p) <- ap + bpdup * DUP + bpadd * ADD, 
-    log(lambda) <- alpha[author,team] + badd[author,team] * ADD, 
+    log(lambda) <- alpha[author,team] ,#+ badd * ADD, 
 
     # adaptive, non-centered priors - we have 11 teams
     transpars> matrix[author,11]:alpha <- compose_noncentered(sigma_author, L_Rho_author, z_author),
-    transpars> matrix[author,11]:badd <- compose_noncentered(sigma_badd, L_Rho_badd, z_badd),
     matrix[11, author]:z_author ~ normal(0, 1),
-    matrix[11, author]:z_badd ~ normal(0, 1),
     
     ap ~ dnorm(0, 1.5),
     bpdup ~ dnorm(0, 0.2),
     bpadd ~ dnorm(0, 0.2),
+#    badd ~ dnorm(0, 0.2),
+#    al[team] ~ dnorm(2.5, 0.7),
     vector[11]:sigma_author ~ dexp(1),
-    vector[11]:sigma_badd ~ dexp(1),
     cholesky_factor_corr[11]:L_Rho_author ~ lkj_corr_cholesky(2),
-    cholesky_factor_corr[11]:L_Rho_badd ~ lkj_corr_cholesky(2),
     # compute ordinary correlation matrixes from Cholesky factors
-    gq> matrix[11,11]:Rho_author <<- Chol_to_Corr(L_Rho_author),
-    gq> matrix[11,11]:Rho_badd <<- Chol_to_Corr(L_Rho_badd)
+    gq> matrix[11,11]:Rho_author <<- Chol_to_Corr(L_Rho_author)
   ), data=data, chains=4, iter = 1e3, cores=4, log_lik = T)
 ```
 
@@ -267,7 +264,16 @@ precis(issue_model, depth=2)
 Lots of NaN in the correlation matrix (L_Rho_author) - is this because authors generally stick to a single team?
 
 ```{r}
-precis(issue_model, depth=3)
+p <- precis(issue_model, depth=3)
+p
+```
+
+```{r}
+precis(issue_model, depth=3, pars=c('L_Rho_author'))
+```
+
+```{r}
+precis(issue_model, depth=3, pars=c('Rho_author'))
 ```
 
 ## Interpreting the results

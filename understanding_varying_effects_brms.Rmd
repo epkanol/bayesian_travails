@@ -1,4 +1,12 @@
-# the below initially from Anders' code
+---
+title: "Understanding Varying Effects with brms"
+author: "Anders Sundelin"
+date: "2022-12-07"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
 library(ggplot2)
 library(ggcorrplot)
 library(tidyr)
@@ -8,7 +16,15 @@ library(dagitty)
 library(stringr)
 library(rethinking)
 library(bayesplot)
+library(tidybayes)
+library(distributional)
+```
 
+## Data Ingestion and Model Building
+
+On my laptop, it takes about 10 minutes per model to run this Rmd file. Beware!
+
+```{r ingest}
 df <- read.csv("samples/authors-team-impact.csv")
 
 scale_cloc      <- data.frame(t(c(count=1771, mean=123.6285, stddev=303.9526, median=56)))
@@ -44,14 +60,12 @@ data <- data_scaled
 data %>% summarize(count = n(), mean(y), sd(y))
 
 data %>% filter(y > 0) %>% summarize(count = n(), mean(y), sd(y))
+```
 
-# ADD added lines for each commit
-# DUP num of duplicated code snippet before commit
-# y num of introduced duplicates
+### Prior Predictive Checks
 
-# Richard's additions
-# Using a ziNB since a ziPoisson is likely not a good fit
-# Create a null model
+### Null model
+```{r}
 # m0 <-
 #   brm(data = data,
 #       family = zero_inflated_negbinomial,
@@ -69,10 +83,11 @@ data %>% filter(y > 0) %>% summarize(count = n(), mean(y), sd(y))
 #                 prior(exponential(1), class = sd),
 #                 prior(lkj(2), class = cor)),
 #       chains = 4, cores = 4, threads = threading(2), sample_prior = "only")
+```
 
-# A model where each team gets an intercept, and then we have individual slopes
-# for each author (in each team) (varying effects model)
-# I have 8 cores so I run two threads on each core with: threads = threading(2)
+### Team Intercept, Author Slope
+```{r}
+set.seed(700716)
 m_nb <-
   brm(data = data,
       family = zero_inflated_negbinomial,
@@ -86,10 +101,15 @@ m_nb <-
       threads = threading(2),
       cores = 4)
 
+```
+### Team Intercept, Author Slope, Additions and Existing Duplicates
+
+```{r}
+set.seed(700716)
 m_nb_add_dup <-
   brm(data = data,
       family = zero_inflated_negbinomial,
-      y ~ 0 + author + (1 + author | team) + ADD + DUP, # fix
+      y ~ 0 + author + (1 + author | team) + ADD + DUP,
       prior = c(prior(normal(0, 0.25), class = b),
                 prior(weibull(2, 1), class = sd),
                 prior(lkj(2), class = cor),
@@ -98,47 +118,65 @@ m_nb_add_dup <-
       chains = 4, cores = 4, backend="cmdstanr",
       threads = threading(2), 
       adapt_delta = 0.95)
+```
 
+## Model Comparison
+
+
+```{r}
 m_nb <- add_criterion(m_nb, criterion = "loo")
 m_nb_add_dup <- add_criterion(m_nb_add_dup, criterion = "loo")
 loo_compare(m_nb, m_nb_add_dup)
-# Clearly adding ADD and DUP has great effect.
+```
 
+Adding ADD and DUP to our model have great effect. 
+But it seems like brms adds the same parameters to both the zero-inflation and to the neg-binomial model (at least as a default).
+
+We select the model with ADD and DUP and use it for illustrating the data.
+
+```{r}
 M <- m_nb_add_dup
+M
+```
 
-# Output of M
-# Group-Level Effects: 
-# ~team (Number of levels: 11) 
-#                       Estimate Est.Error l-95% CI u-95% CI Rhat Bulk_ESS Tail_ESS
-# sd(Intercept)             2.42      0.31     1.87     3.10 1.00      847     1466
-# sd(author)                0.04      0.01     0.02     0.07 1.00     1107     1726
-# cor(Intercept,author)    -0.81      0.23    -0.98    -0.09 1.00     1137     1841
+### Diagnostics
 
-# Population-Level Effects: 
-#        Estimate Est.Error l-95% CI u-95% CI Rhat Bulk_ESS Tail_ESS
-# author    -0.05      0.02    -0.09    -0.01 1.00      933     1562
-# ADD        1.17      0.06     1.05     1.30 1.00     4831     3183
-# DUP        0.21      0.02     0.17     0.26 1.00     4586     2467
+Manually running mcmc_trace in the plot area shows more details.
 
-# Family Specific Parameters: 
-#       Estimate Est.Error l-95% CI u-95% CI Rhat Bulk_ESS Tail_ESS
-# shape     0.12      0.01     0.10     0.14 1.00     4518     3329
-# zi        0.03      0.02     0.00     0.09 1.00     2850     1992
-
-# Diagnostics
+```{r}
 stopifnot(rhat(M) < 1.01)
 stopifnot(neff_ratio(M) > 0.20)
 mcmc_trace(M) # ok
+```
+
+Checking R-hat and number of effective parameters.
+
+The trace plots of the MCMC walk should converge and reach some sort of "mixed state". Divergence indicates an ill-fitted model.
+
+```{r}
 np <- nuts_params(M)
 lp <- log_posterior(M)
 mcmc_nuts_divergence(np, lp) # ok
+```
+
+
+
+```{r}
 loo(M) # ok
 
+```
+
+
+### Posterior
+
+```{r}
 # check how the posterior for the correlation of the random effects
 # compares to prior
 post <- as_draws_df(M)
 
-# we used lkj(2)
+```
+
+```{r}
 r_2 <-
   rlkjcorr(1e4, K = 2, eta = 2) |>
   data.frame()
@@ -161,15 +199,70 @@ post %>%
 # it seems to be strong negative effects but we clearly see data has told its
 # story
 
-# How does the variance differ bw team and author?
+```
+
+### Understanding Posterior Shape
+
+```{r}
 mcmc_areas_ridges(M, regex_pars = "sd_team__")
+```
 
-# between teams and authors?
+```{r}
 mcmc_areas_ridges(M, pars = c("r_team[1,author]","r_team[2,author]","r_team[3,author]", "r_team[4,author]","r_team[5,author]","r_team[6,author]","r_team[7,author]","r_team[8,author]","r_team[9,author]","r_team[10,author]","r_team[11,author]"), prob = 0.95)
+```
 
-# between teams
+```{r}
 mcmc_areas_ridges(M, pars = c("r_team[1,Intercept]","r_team[2,Intercept]","r_team[3,Intercept]","r_team[4,Intercept]","r_team[5,Intercept]","r_team[6,Intercept]","r_team[7,Intercept]","r_team[8,Intercept]","r_team[9,Intercept]","r_team[10,Intercept]",
     "r_team[11,Intercept]"), prob = 0.95)
+```
 
+```{r}
 mcmc_areas_ridges(M, regex_pars = "^b_")
+```
 
+## Posterior predictions
+
+Following Andrew Heiss, https://www.andrewheiss.com/blog/2022/09/26/guide-visualizing-types-posteriors/
+
+Let's predict what the model says about a new change that comes in.
+If we let author 5 in team 7 add 30 lines to file 17, which had 6 existing duplicated blocks, how likely is s/he to introduce duplicates?
+
+```{r}
+newdata <- data.frame(t(c(file=17, author=5, team=7, ADD=30/scale_added$stddev, DUP=6/scale_dupblocks$stddev)))
+
+issues_linpred <- M |> linpred_draws(newdata=newdata)
+```
+
+```{r}
+issues_linpred |> ggplot(aes(x=.linpred)) + stat_halfeye() + scale_x_continuous()
+```
+
+```{r}
+data |> group_by(author, team) |> tally() |> head(10)
+```
+
+```{r}
+issues_epred <- M |> epred_draws(newdata=newdata)
+issues_epred |> ggplot(aes(x=.epred)) + stat_halfeye() + scale_x_continuous()
+
+```
+
+```{r}
+issues_predicted <- M |> predicted_draws(newdata=newdata)
+issues_predicted |> ggplot(aes(x=.prediction)) + stat_halfeye() + scale_x_continuous()
+
+```
+
+Playing around with newdata. we can let the model predict the likelihood of issues being introduced.
+Change the number of added lines, or the number of existing duplicates, and we can see the probability of new issues being introduced.
+
+Questions:
+*) I certainly need to read, and most likely reread Andrew's excellent blog post above, though it focused on Gaussian standard models. But I interpret the "y" axis as the probability, and the x axis (at least in the last plot) as the number of introduced issues (i.e. the quantity that we let our model predict)
+*) In rethinking, the default is to have explicitly separate models for the zero-inflation and for the rate parameter. But brms seems to default to use the same formula for both, or? Are there caveats or options that might prevent different models for the zero-inflation and for the rate? I also am confused by this statement: `shape = identity; zi = identity` - seems like we are not using any logit link for the zi part?
+*) I see that I can easily predict the behaviour for a new (previously unknown) author - I guess the model then will "start out at" the average for all the authors, and use the incoming data to update the factors for that particular author. But when I add a new team, I get an error:
+
+`Error: Levels '12' of grouping factor 'team' cannot be found in the fitted model. Consider setting argument 'allow_new_levels' to TRUE.`
+
+I don't know if this is really relevant or not, but it is at least interesting (and shows that we should let the teams control the intercepts, and let the authors control the slopes - I just need to wrap my head around "what is the unit on the x-axis that the slopes vary over? Is it both ADD and DUP, or something else?)
+
+*) AP Anders: Read up on prior predictive checks using brms and the tidyverse!
