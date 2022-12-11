@@ -1,0 +1,223 @@
+---
+title: "Multilevel Model BRMS Tutorial - Prior Selection"
+author: "Anders Sundelin"
+date: "2022-12-10"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(brms) # for the analysis
+library(haven) # to load the SPSS .sav file
+library(tidyverse) # needed for data manipulation.
+library(RColorBrewer) # needed for some extra colours in one of the graphs
+library(ggmcmc)
+library(ggthemes)
+library(lme4)
+```
+
+## Influence of Priors
+
+Based on the BRMS tutorial at https://www.rensvandeschoot.com/tutorials/brms-priors/
+
+Code and comments are here, but I will not repeat the text.
+
+```{r ingest}
+popular2data <- read_sav(file ="https://github.com/MultiLevelAnalysis/Datasets-third-edition-Multilevel-book/blob/master/chapter%202/popularity/SPSS/popular2.sav?raw=true")
+popular2data <- select(popular2data, pupil, class, extrav, sex, texp, popular) # we select just the variables we will use
+head(popular2data) # we have a look at the first 6 observations
+```
+
+```{r}
+get_prior(popular ~ 0 + Intercept + sex + extrav + texp + extrav:texp + (1 + extrav | class), data = popular2data)
+```
+
+```{r}
+prior1 <- c(set_prior("normal(-10,100)", class = "b", coef = "extrav"),
+            set_prior("normal(10,100)", class = "b", coef = "extrav:texp"),
+            set_prior("normal(-5,100)", class = "b", coef = "sex"),
+            set_prior("normal(-5,100)", class = "b", coef = "texp"),
+            set_prior("normal(10,100)", class = "b", coef = "Intercept" ))
+```
+
+```{r}
+model6 <- brm(popular ~ 0 + Intercept + sex + extrav + texp + extrav:texp + (1 + extrav|class), 
+              data  = popular2data, 
+              warmup = 1000,
+              iter  = 3000, 
+              chains = 4, 
+              prior = prior1,
+              seed  = 123,
+              control = list(adapt_delta = 0.97),
+              cores = 4,
+              backend="cmdstanr",
+              threads = threading(2),
+              sample_prior = TRUE) # to reach a usuable number effective samples in the posterior distribution of the interaction effect, we need many more iteration. This sampler will take quite some time and you might want to run it with a few less iterations.
+```
+
+```{r}
+prior_summary(model6)
+```
+
+```{r}
+stancode(model6)
+```
+
+## Informative Priors
+
+
+```{r }
+prior2 <- c(set_prior("normal(.8,.1)", class = "b", coef = "extrav"),
+            set_prior("normal(-.025,.1)", class = "b", coef = "extrav:texp"),
+            set_prior("normal(1.25,.1)", class = "b", coef = "sex"),
+            set_prior("normal(.23,.1)", class = "b", coef = "texp"),
+            set_prior("normal(-1.21,.1)", class = "b", coef = "Intercept" ))
+
+model7 <- brm(popular ~ 0 + Intercept + sex + extrav + texp + extrav:texp + (1 + extrav|class), 
+              data  = popular2data,
+              warmup = 1000,
+              iter  = 3000, 
+              chains = 4, 
+              prior = prior2,
+              seed  = 123, 
+              control = list(adapt_delta = 0.97),
+              cores = 4,
+              backend="cmdstanr",
+              threads = threading(2),
+              sample_prior = TRUE)
+
+```
+```{r}
+summary(model7)
+```
+
+
+```{r}
+prior3 <- c(set_prior("normal(-1,.1)", class = "b", coef = "extrav"),
+            set_prior("normal(3, 1)", class = "b", coef = "extrav:texp"),
+            set_prior("normal(-3,1)", class = "b", coef = "sex"),
+            set_prior("normal(-3,1)", class = "b", coef = "texp"),
+            set_prior("normal(0,5)", class = "b", coef = "Intercept" ))
+
+model8 <- brm(popular ~ 0 + Intercept + sex + extrav + texp + extrav:texp + (1 + extrav|class), 
+              data  = popular2data,
+              warmup = 1000,
+              iter  = 3000,
+              chains = 4, 
+              prior = prior3,
+              seed  = 123,
+              control = list(adapt_delta = 0.97),
+              cores = 4,
+              backend="cmdstanr",
+              threads = threading(2),
+              sample_prior = TRUE)
+summary(model8)
+```
+
+```{r}
+prior4 <- c(set_prior("normal(3,.1)", class = "b", coef = "extrav"),
+            set_prior("normal(-3,1)", class = "b", coef = "extrav:texp"),
+            set_prior("normal(3,1)", class = "b", coef = "sex"),
+            set_prior("normal(3,1)", class = "b", coef = "texp"),
+            set_prior("normal(0,5)", class = "b", coef = "Intercept" ))
+
+
+model9 <- brm(popular ~ 0 + Intercept + sex + extrav + texp + extrav:texp + (1 + extrav|class), 
+              data  = popular2data,
+              warmup = 1000,
+              iter  = 3000, 
+              chains = 4, 
+              prior = prior4,
+              seed  = 123, 
+              control = list(adapt_delta = 0.97),
+              cores = 4,
+              backend="cmdstanr",
+              threads = threading(2),
+              sample_prior = TRUE)
+summary(model9)
+```
+
+```{r}
+hyp8texp <- hypothesis(model8, "texp > 0")
+hyp8texp
+plot(hyp8texp)
+```
+
+```{r}
+hyp8sex <- hypothesis(model8, "sex = 0")
+hyp8sex
+plot(hyp8sex)
+```
+
+```{r}
+hyp8extrav <- hypothesis(model8, "extrav > 0")
+hyp8extrav
+plot(hyp8extrav)
+
+```
+
+```{r}
+hyp8extravtexp <- hypothesis(model8, "extrav:texp > 0")
+hyp8extravtexp
+plot(hyp8extravtexp)
+
+```
+
+```{r}
+hyp8inter <- hypothesis(model8, "Intercept > 0")
+hyp8inter
+plot(hyp8inter)
+
+```
+
+```{r}
+posterior1 <- posterior_samples(model6, pars = "b_extrav")[, c(1,3)]
+posterior2 <- posterior_samples(model8, pars = "b_extrav")[, c(1,3)]
+posterior3 <- posterior_samples(model9, pars = "b_extrav")[, c(1,3)]
+
+posterior1.2.3 <- bind_rows("prior 1" = gather(posterior1),
+                            "prior 2" = gather(posterior2), 
+                            "prior 3" = gather(posterior3), 
+                            .id = "id")
+modelLME <- lmer(popular ~ 1 + sex + extrav + texp + extrav:texp + (1 + extrav | class), data = popular2data)
+
+ggplot(data    = posterior1.2.3, 
+       mapping = aes(x        = value,
+                     fill     =  id, 
+                     colour   = key,
+                     linetype = key, 
+                     alpha    = key)) +
+  geom_density(size = 1.2)+
+  geom_vline(xintercept = summary(modelLME)$coefficients["extrav", "Estimate"], # add the frequentist solution too
+             size = .8, linetype = 2, col = "black")+ 
+  scale_x_continuous(limits = c(-1.5, 3))+
+  coord_cartesian(ylim = c(0, 5))+
+  scale_fill_manual(name   = "Densities", 
+                    values = c("Yellow","darkred","blue" ), 
+                    labels = c("uniformative ~ N(-10,100) prior",
+                               "informative ~ N(-1,.1) prior",
+                               "informative ~ N(3,.1) prior") )+
+  scale_colour_manual(name   = 'Posterior/Prior', 
+                      values = c("black","red"), 
+                      labels = c("posterior", "prior"))+
+  scale_linetype_manual(name   ='Posterior/Prior', 
+                        values = c("solid","dotted"), 
+                        labels = c("posterior", "prior"))+
+  scale_alpha_discrete(name   = 'Posterior/Prior', 
+                       range  = c(.7,.3), 
+                       labels = c("posterior", "prior"))+
+  annotate(geom    = "text", 
+           x = 0.45, y = -.13,
+           label  = "LME estimate:  0.804", 
+           col    = "black", 
+           family = theme_get()$text[["family"]], 
+           size   = theme_get()$text[["size"]]/3.5, 
+           fontface="italic")+
+  labs(title    = expression("Influence of (Informative) Priors on" ~ gamma[Extraversion]),
+       subtitle = "3 different densities of priors and posteriors and the LME estimate")+
+  theme_tufte()
+```
+
+So, we see that the uninformative prior ends up estimating $\beta_{extraversion}$ similar to the frequentist estimate.
+If we add more informative priors, we can pull the result in either direction (depending on our beliefs).
+Red dotted line and light colour shows the priors, and the filled boxes the resulting distributions.

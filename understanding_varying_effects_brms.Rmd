@@ -34,23 +34,25 @@ scale_dupblocks <- data.frame(t(c(count=1771, mean=0.9994353, stddev=3.071005, m
 scale_added <- df %>% summarize(count=n(), mean=mean(added), stddev=sd(added), median=median(added))
 scale_removed <- df %>% summarize(count=n(), mean=mean(removed), stddev=sd(removed), median=median(removed))
 
-data_centered <- df %>% mutate(file=fileid, author=authorid, team=authorteamid, 
-                               ADD=(added-scale_added$mean)/scale_added$stddev, 
-                               DEL=(removed-scale_removed$mean)/scale_removed$stddev, 
-                               CLOC=(currCloc-scale_cloc$mean)/scale_cloc$stddev, 
-                               COMPLEX=(currComplex-scale_mccabe$mean)/scale_mccabe$stddev, 
+data_centered <- df %>% mutate(file=fileid, author=authorid, team=authorteamid,
+                               ISTEST=istestfile,
+                               ADD=(added-scale_added$mean)/scale_added$stddev,
+                               DEL=(removed-scale_removed$mean)/scale_removed$stddev,
+                               CLOC=(currCloc-scale_cloc$mean)/scale_cloc$stddev,
+                               COMPLEX=(currComplex-scale_mccabe$mean)/scale_mccabe$stddev,
                                DUP=(prevDupBlocks-scale_dupblocks$mean)/scale_dupblocks$stddev,
                                INTROD=if_else(delta >= 0, delta, as.integer(0)),
                                REMOVED=if_else(delta <= 0, delta, as.integer(0)),
                                y=INTROD) %>%
   select(file, author, team, ADD, DUP, y)
 
-data_scaled <- df %>% mutate(file=fileid, author=authorid, team=authorteamid, 
-                             ADD=(added)/scale_added$stddev, 
-                             DEL=(removed)/scale_removed$stddev, 
-                             CLOC=(currCloc)/scale_cloc$stddev, 
-                             COMPLEX=(currComplex)/scale_mccabe$stddev, 
-                             DUP=(prevDupBlocks)/scale_dupblocks$stddev, 
+data_scaled <- df %>% mutate(file=fileid, author=authorid, team=authorteamid,
+                             ISTEST=istestfile,
+                             ADD=(added)/scale_added$stddev,
+                             DEL=(removed)/scale_removed$stddev,
+                             CLOC=(currCloc)/scale_cloc$stddev,
+                             COMPLEX=(currComplex)/scale_mccabe$stddev,
+                             DUP=(prevDupBlocks)/scale_dupblocks$stddev,
                              INTROD=if_else(delta >= 0, delta, as.integer(0)),
                              REMOVED=if_else(delta <= 0, delta, as.integer(0)),
                              y=INTROD) %>%
@@ -97,12 +99,21 @@ m_nb <-
                 prior(lkj(2), class = cor),
                 prior(beta(1, 1), class = zi),
                 prior(gamma(0.01, 0.01), class = shape)),
-      chains = 4, backend="cmdstanr",
+      warmup = 1000,
+      iter  = 4000,
+      chains = 4,
+      backend="cmdstanr",
       threads = threading(2),
       cores = 4)
 
 ```
 ### Team Intercept, Author Slope, Additions and Existing Duplicates
+
+This model assumes a fixed zero-inflation probability for all files and changes.
+In the summary output, it is stated:
+
+    Links: mu = log; shape = identity; *zi = identity*
+
 
 ```{r}
 set.seed(700716)
@@ -115,10 +126,66 @@ m_nb_add_dup <-
                 prior(lkj(2), class = cor),
                 prior(beta(1, 1), class = zi),
                 prior(gamma(0.01, 0.01), class = shape)),
-      chains = 4, cores = 4, backend="cmdstanr",
-      threads = threading(2), 
+      warmup = 1000,
+      iter  = 4000,
+      chains = 4,
+      cores = 4,
+      backend="cmdstanr",
+      threads = threading(2),
       adapt_delta = 0.95)
 ```
+
+```{r}
+summary(m_nb_add_dup)
+```
+
+### Controlling the zero-inflation via parameters
+
+We use the `bf` function to build a composite formula, where the zero-inflation part also can be controlled by parameters from the data.
+
+The `get_priors` function is used to get brms to show what kinds of priors that are possible to set, for any given formula.
+Note that brms, uses a different philosophy than `rethinking` --- it will use default priors, unless you set them to some function, and you can set priors based on the class of the parameter being estimated.
+
+Classes include:
+
+* `b` --- a normal beta (slope parameter or intercept)
+* `sd` --- a standard-deviation parameter (always non-negative)
+* `cor` --- a correlation matrix, for instance between intercepts and slopes (where we typically use an lkj)
+* `shape` --- a shape parameter to distributions such as the Gamma distribution
+
+```{r}
+set.seed(700716)
+m_zi_nb_add_dup <-
+  brm(data = data,
+      family = zero_inflated_negbinomial,
+      bf(y ~ 0 + (1 + author | team) + ADD + DUP,
+         zi ~ 1 + ADD + DUP),
+      prior = c(prior(normal(0, 0.25), class = b),
+                prior(weibull(2, 1), class = sd),
+                prior(lkj(2), class = cor),
+#                prior(beta(1, 1), class = zi),
+                prior(gamma(0.01, 0.01), class = shape)),
+      warmup = 1000,
+      iter  = 4000,
+      chains = 4,
+      cores = 4,
+      backend="cmdstanr",
+      threads = threading(2),
+      adapt_delta = 0.95)
+```
+
+
+
+```{r}
+get_prior(formula = bf(y ~ 0 + author + (1 + author | team) + ADD + DUP, zi ~ 1 + ADD + DUP),
+          data=data,
+          family=zero_inflated_negbinomial)
+```
+
+```{r}
+summary(m_zi_nb_add_dup)
+```
+
 
 ## Model Comparison
 
@@ -129,17 +196,31 @@ m_nb_add_dup <- add_criterion(m_nb_add_dup, criterion = "loo")
 loo_compare(m_nb, m_nb_add_dup)
 ```
 
-Adding ADD and DUP to our model have great effect. 
-But it seems like brms adds the same parameters to both the zero-inflation and to the neg-binomial model (at least as a default).
+Adding ADD and DUP to our model have great effect.
 
-We select the model with ADD and DUP and use it for illustrating the data.
 
 ```{r}
-M <- m_nb_add_dup
+m_zi_nb_add_dup <- add_criterion(m_zi_nb_add_dup, criterion = "loo")
+loo_compare(m_zi_nb_add_dup, m_nb_add_dup)
+
+```
+
+As is expected, the model where zi was dependent on the ADD and DUP parameters performed better.
+
+
+
+We select the model with ADD and DUP for both the rate and the zero-inflation and use it for illustrating the data.
+
+```{r}
+M <- m_zi_nb_add_dup
 M
 ```
 
 ### Diagnostics
+
+```{r}
+neff_ratio(M)
+```
 
 Manually running mcmc_trace in the plot area shows more details.
 
@@ -189,9 +270,9 @@ post %>%
                    color = "transparent", fill = "blue", alpha = 3/4) +
       geom_density(aes(x = cor_team__Intercept__author),
                    color = "transparent", fill = "#A65141", alpha = 9/10) +
-      annotate(geom = "text", 
-               x = c(-0.6, 0), y = c(2.2, 1.0), 
-               label = c("posterior", "prior"), 
+      annotate(geom = "text",
+               x = c(-0.6, 0), y = c(2.2, 1.0),
+               label = c("posterior", "prior"),
                color = c("#A65141", "blue")) +
       scale_y_continuous(NULL, breaks = NULL) +
       labs(subtitle = "Correlation between intercepts and slopes, prior and posterior",
@@ -220,6 +301,16 @@ mcmc_areas_ridges(M, pars = c("r_team[1,Intercept]","r_team[2,Intercept]","r_tea
 mcmc_areas_ridges(M, regex_pars = "^b_")
 ```
 
+```{r}
+pp_check(M, type = "error_hist", ndraws = 11)
+```
+
+```{r}
+pp_check(M, type = "loo_pit")
+
+```
+
+
 ## Posterior predictions
 
 Following Andrew Heiss, https://www.andrewheiss.com/blog/2022/09/26/guide-visualizing-types-posteriors/
@@ -227,19 +318,27 @@ Following Andrew Heiss, https://www.andrewheiss.com/blog/2022/09/26/guide-visual
 Let's predict what the model says about a new change that comes in.
 If we let author 5 in team 7 add 30 lines to file 17, which had 6 existing duplicated blocks, how likely is s/he to introduce duplicates?
 
+
+posterior_linpred uses draws of the linear predictor (before any link function has been applied).
+
 ```{r}
 newdata <- data.frame(t(c(file=17, author=5, team=7, ADD=30/scale_added$stddev, DUP=6/scale_dupblocks$stddev)))
 
 issues_linpred <- M |> linpred_draws(newdata=newdata)
 ```
 
+
+So, this is on the logit scale - the linear part, before linking.
+
 ```{r}
 issues_linpred |> ggplot(aes(x=.linpred)) + stat_halfeye() + scale_x_continuous()
 ```
 
 ```{r}
-data |> group_by(author, team) |> tally() |> head(10)
+data |> group_by(team, author) |> tally() |> head(10)
 ```
+
+epred draws returns the expected value of the parameter
 
 ```{r}
 issues_epred <- M |> epred_draws(newdata=newdata)
@@ -247,22 +346,117 @@ issues_epred |> ggplot(aes(x=.epred)) + stat_halfeye() + scale_x_continuous()
 
 ```
 
+And in the predicted_draws we have the probabilities on the outcome scale.
+We see the high probability of zero issues being introduced, with correspondingly fewer
 ```{r}
 issues_predicted <- M |> predicted_draws(newdata=newdata)
 issues_predicted |> ggplot(aes(x=.prediction)) + stat_halfeye() + scale_x_continuous()
 
 ```
 
+### Author effects
+
+If we look at the author who introduced the most issues, relative to the number of files that had
+
+```{r}
+data %>% group_by(author) %>% summarize(issues = sum(y)) %>% arrange(desc(issues)) %>% head(5)
+```
+
+```{r}
+data %>% filter(y > 0) %>% group_by(author) %>% summarize(relissues = sum(y)/n()) %>% arrange(desc(relissues)) %>% head(5)
+```
+
+So, we see that author 10 introduced the most issues overall (121), but relative to the number of issues introduced per file (that was not zero), the highest number of issues came from author 68.
+
+How do these compare?
+
+Base, random author:
+
+```{r}
+newdata <- data.frame(t(c(file=17, author=5, team=7, ADD=30/scale_added$stddev, DUP=6/scale_dupblocks$stddev)))
+M |> predicted_draws(newdata=newdata) |> ggplot(aes(x=.prediction)) + stat_halfeye() + scale_x_continuous() + coord_cartesian(ylim=c(0,0.1))
+```
+
+
+
+
+```{r}
+newdata <- data.frame(t(c(file=17, author=10, team=7, ADD=30/scale_added$stddev, DUP=6/scale_dupblocks$stddev)))
+predicted_author10 <- M |> predicted_draws(newdata=newdata)
+predicted_author10 |> ggplot(aes(x=.prediction)) + stat_halfeye() + scale_x_continuous() + coord_cartesian(ylim=c(0,0.1))
+
+```
+
+```{r}
+newdata <- data.frame(t(c(file=17, author=68, team=7, ADD=30/scale_added$stddev, DUP=6/scale_dupblocks$stddev)))
+predicted_author68 <- M |> predicted_draws(newdata=newdata)
+predicted_author68 |> ggplot(aes(x=.prediction)) + stat_halfeye() + scale_x_continuous() + coord_cartesian(ylim=c(0,0.1))
+
+```
+
+So, we see that author 68 actually have lower maximum a posteriori probability (peaking around 0.06) to introduce one issue in a file as we specified.
+Whereas author 10 has about 8% maximum a posteriori probability to introduce one issue. But note the scale on the x axis.
+Author 10 has a tendency to make smaller additions of issues. Author 68 has a wider span (but this could also be due to chances - we really need to look att the stddev of the parameter)
+
+```{r}
+max(predicted_author10$.prediction)
+max(predicted_author68$.prediction)
+```
+### Team effects
+
+```{r}
+data %>% group_by(team) %>% summarize(issues = sum(y)) %>% arrange(desc(issues))
+```
+
+```{r}
+data %>% filter(y > 0) %>% group_by(team) %>% summarize(relissues = sum(y)/n()) %>% arrange(desc(relissues))
+```
+
+Team 2 seems to be introducing most issues in this repository, both in absolute and relative terms.
+
+Which team has made most changes overall?
+
+```{r}
+data %>% group_by(team) %>% summarize(fileschanged = n()) %>% arrange(desc(fileschanged))
+
+```
+
+Team 6 have changed about a third of the files in the repo, but are still the top 3 team for introducing duplicates.
+How do our authors fare if we put them in that team?
+
+```{r}
+newdata <- data.frame(t(c(file=17, author=10, team=6, ADD=30/scale_added$stddev, DUP=6/scale_dupblocks$stddev)))
+predicted_author10_team6 <- M |> predicted_draws(newdata=newdata)
+predicted_author10_team6 |> ggplot(aes(x=.prediction)) + stat_halfeye() + scale_x_continuous() + coord_cartesian(ylim=c(0,0.1))
+
+```
+
+Much more probability between the spikes!
+
+```{r}
+newdata <- data.frame(t(c(file=17, author=68, team=6, ADD=30/scale_added$stddev, DUP=6/scale_dupblocks$stddev)))
+predicted_author68_team6 <- M |> predicted_draws(newdata=newdata)
+predicted_author68_team6 |> ggplot(aes(x=.prediction)) + stat_halfeye() + scale_x_continuous() + coord_cartesian(ylim=c(0,0.1))
+
+```
+
+So, clearly, the model thinks that putting author 68 in team 6 will make it much more likely for issues to appear!
+Both the width and the height of the probabilities increase a lot with team 6, relative to the original team 7.
+
+
 Playing around with newdata. we can let the model predict the likelihood of issues being introduced.
 Change the number of added lines, or the number of existing duplicates, and we can see the probability of new issues being introduced.
 
 Questions:
+*) When I introduced a specific ZI-model, I could no longer use the beta(1,1) distribution. The zi parameter was gone - I guess the normal "b" priors are then used for those parameters, right?
+*) How to model the rest of the beta binomial parameters? (e.g. shape)
 *) I certainly need to read, and most likely reread Andrew's excellent blog post above, though it focused on Gaussian standard models. But I interpret the "y" axis as the probability, and the x axis (at least in the last plot) as the number of introduced issues (i.e. the quantity that we let our model predict)
-*) In rethinking, the default is to have explicitly separate models for the zero-inflation and for the rate parameter. But brms seems to default to use the same formula for both, or? Are there caveats or options that might prevent different models for the zero-inflation and for the rate? I also am confused by this statement: `shape = identity; zi = identity` - seems like we are not using any logit link for the zi part?
 *) I see that I can easily predict the behaviour for a new (previously unknown) author - I guess the model then will "start out at" the average for all the authors, and use the incoming data to update the factors for that particular author. But when I add a new team, I get an error:
 
 `Error: Levels '12' of grouping factor 'team' cannot be found in the fitted model. Consider setting argument 'allow_new_levels' to TRUE.`
 
-I don't know if this is really relevant or not, but it is at least interesting (and shows that we should let the teams control the intercepts, and let the authors control the slopes - I just need to wrap my head around "what is the unit on the x-axis that the slopes vary over? Is it both ADD and DUP, or something else?)
+I don't know if this is really relevant or not, but it is at least interesting (and shows that we should let the teams control the intercepts ---
+I guess the author slope is the amount of change that , and let the authors control the slopes - I just need to wrap my head around "what is the unit on the x-axis that the slopes vary over"? Is it like an indicator variable, which can be 0 or 1 (i.e. an adjustment for a particular author, given a particular team --- that is, an intercept).
+*) What is the easiest way to integrate over the above predictions? I mean, to put a figure on the amount of probability difference between putting author 68 in team 6 or in team 7?
 
 *) AP Anders: Read up on prior predictive checks using brms and the tidyverse!

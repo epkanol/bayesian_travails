@@ -57,8 +57,9 @@ data_centered <- df %>% mutate(file=fileid, author=authorid, team=authorteamid,
                                DUP=(prevDupBlocks-scale_dupblocks$mean)/scale_dupblocks$stddev,
                                INTROD=if_else(delta >= 0, delta, as.integer(0)),
                                REMOVED=if_else(delta <= 0, delta, as.integer(0)),
+                               ISNEW=as.numeric(prevCloc == 0),
                                y=INTROD) %>%
-  select(file, author, team, ADD, DUP, y)
+  select(file, istestfile, author, team, ADD, DUP, ISNEW, y)
 
 data_scaled <- df %>% mutate(file=fileid, author=authorid, team=authorteamid, 
                              ADD=(added)/scale_added$stddev, 
@@ -68,8 +69,9 @@ data_scaled <- df %>% mutate(file=fileid, author=authorid, team=authorteamid,
                              DUP=(prevDupBlocks)/scale_dupblocks$stddev, 
                              INTROD=if_else(delta >= 0, delta, as.integer(0)),
                              REMOVED=if_else(delta <= 0, delta, as.integer(0)),
+                             ISNEW=as.numeric(prevCloc == 0),
                              y=INTROD) %>%
-  select(file, author, team, ADD, DUP, y)
+  select(file, istestfile, author, team, ADD, DUP, ISNEW, y)
 data <- data_scaled
 
 ```
@@ -93,6 +95,15 @@ They are not particularly similar, so a regular Poisson will not do. But if we r
 data %>% filter(y > 0) %>% summarize(count=n(), mean(y), sd(y))
 ```
 
+```{r}
+data %>% ggplot(aes(x=ADD, y=y, color=istestfile)) + geom_point()
+```
+
+```{r}
+df %>% filter(delta == max(delta))
+```
+
+
 These values at least are roughly similar, so let's see if we can make the model work
 
 ### Intercept by team, slope per author
@@ -104,13 +115,15 @@ set.seed(123456)
 issue_model_intercept_team <- ulam(
   alist(
     y ~ dzipois(p, lambda),
-    logit(p) <- ap + bpdup * DUP + bpadd * ADD,
-    log(lambda) <- alpha[team] + badd[author] * ADD,
+    logit(p) <- ap + bpdup * DUP + bpadd * ADD + bpistest * istestfile,
+    log(lambda) <- alpha[team] + badd[author] * ADD + bistest * istestfile,
     ap ~ dnorm(0, 1.5),
     bpdup ~ dnorm(0, 0.2),
     bpadd ~ dnorm(0, 0.2),
+    bpistest ~ dnorm(0, 0.2),
     alpha[team] ~ dnorm(alpha_team_bar, sigma_team),
     badd[author] ~ dnorm(badd_author_bar, sigma_author),
+    bistest ~ dnorm(0, 0.2),
     alpha_team_bar ~ dnorm(2.5, 0.7),
     sigma_team ~ dexp(1),
     badd_author_bar ~ dnorm(0, 0.2),
@@ -148,15 +161,17 @@ set.seed(123456)
 issue_model_intercept_author <- ulam(
   alist(
     y ~ dzipois(p, lambda),
-    logit(p) <- ap + bpdup * DUP + bpadd * ADD,
-    log(lambda) <- alpha[author] + badd[team] * ADD,
+    logit(p) <- ap + bpdup * DUP + bpadd * ADD + bpistest * istestfile,
+    log(lambda) <- alpha[author] + badd[team] * ADD + bistest * istestfile,
     ap ~ dnorm(0, 1.5),
     bpdup ~ dnorm(0, 0.2),
     bpadd ~ dnorm(0, 0.2),
+    bpistest ~ dnorm(0, 0.2),
     alpha[author] ~ dnorm(alpha_author_bar, sigma_author),
     badd[team] ~ dnorm(badd_team_bar, sigma_team),
     alpha_author_bar ~ dnorm(2.5, 0.7),
     badd_team_bar ~ dnorm(0, 0.2),
+    bistest ~ dnorm(0, 0.2),
     sigma_team ~ dexp(1),
     sigma_author ~ dexp(1)
   ), data=data, chains=4, iter=1e3, cores=4, log_lik = TRUE)
@@ -193,11 +208,13 @@ set.seed(123456)
 issue_model_global_intercept <- ulam(
   alist(
     y ~ dzipois(p, lambda),
-    logit(p) <- ap + bpdup * DUP + bpadd * ADD,
-    log(lambda) <- alpha + badd * ADD,
+    logit(p) <- ap + bpdup * DUP + bpadd * ADD + bpistest * istestfile,
+    log(lambda) <- alpha + badd * ADD + bpistest * istestfile,
     ap ~ dnorm(0, 1.5),
     bpdup ~ dnorm(0, 0.2),
     bpadd ~ dnorm(0, 0.2),
+    bpistest ~ dnorm(0, 0.2),
+    bistest ~ dnorm(0, 0.2),
     alpha ~ dnorm(2.5, 0.7),
     badd ~ dnorm(0, 0.2)
   ), data=data, chains=4, iter=1e3, cores=4, log_lik = TRUE)

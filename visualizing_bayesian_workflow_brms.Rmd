@@ -1,0 +1,346 @@
+---
+title: "Visualizing the Bayesian Workflow With BRMS"
+author: "Anders Sundelin"
+date: "2022-12-10"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(rstan)
+library(brms)
+library(bayesplot)
+library(loo)
+library(tidybayes)
+```
+
+## Visualizing the Bayesian Workflow
+
+Monica Alexander has a great tutorial on prior predictive checks at https://www.monicaalexander.com/posts/2020-28-02-bayes_viz/.
+
+```{r generate-sample-data, eval=FALSE}
+
+# download better done through your browser, it will have a longer timeout than Rs default 60 seconds...
+#download.file("https://data.nber.org/natality/2017/natl2017.csv.zip", destfile = "natl2017.csv.zip")
+
+# read in and select
+d <- read_csv("~/Downloads/natl2017.csv.zip")
+head(d)
+d <- d %>%
+  select(mager, mracehisp, meduc, bmi, sex, combgest, dbwt, ilive)
+
+# only use a sample of the births
+set.seed(853)
+ds <- d[sample(1:nrow(d), nrow(d)*0.001),]
+
+ds <- ds %>% mutate(dbwt= dbwt/1000)
+write_rds(ds, path = "births_2017_sample.RDS")
+```
+
+```{r ingest}
+ds <- read_rds("births_2017_sample.RDS")
+head(ds)
+```
+## Simple Exploratory Data Analysis
+
+```{r}
+ds <- ds %>% 
+  rename(birthweight = dbwt, gest = combgest) %>% 
+  mutate(preterm = ifelse(gest<32, "Y", "N")) %>% 
+  filter(ilive=="Y",gest< 99, birthweight<9.999)
+ds %>% 
+  ggplot(aes(log(gest), log(birthweight))) + 
+  geom_point() + geom_smooth(method = "lm") + 
+  scale_color_brewer(palette = "Set1") + 
+  theme_bw(base_size = 14) +
+  ggtitle("birthweight v gestational age")
+```
+
+Separating out premature babies.
+
+```{r}
+ds %>% 
+  ggplot(aes(log(gest), log(birthweight), color = preterm)) + 
+  geom_point() + geom_smooth(method = "lm") + 
+  scale_color_brewer(palette = "Set1") + 
+  theme_bw(base_size = 14) + 
+  ggtitle("birthweight v gestational age")
+```
+
+
+## Candidate Models
+
+Alternative 1 - simple model, straight relationship between log birth weight and log gestational age:
+
+$log(y_i) \sim N(\beta_0 + \beta_1 log(x_i), \sigma^2) $
+
+Alternative 2 has an interaction term (both fixed effect and effect proportional to the original log gestational age)
+
+$log(y_i) \sim N(\beta_0 + \beta_1 log(x_i) + \gamma_0 z_i + \gamma_1 log(x_i) z_i, \sigma^2) $
+
+where 
+
+* $y_i$ is weight in kg
+* $x_i$ is gestational age in weeks
+* $z_i$ is preterm (0 or 1, if gestational age is less than 32 weeks)
+
+
+
+## Prior Predictive Checks
+
+We do simulations from priors and likelihood and plot the resulting distribution, to see whether we come up with reasonable values.
+
+### Vague priors
+
+
+```{r vague}
+set.seed(182)
+nsims <- 100
+sigma <- 1 / sqrt(rgamma(nsims, 1, rate = 100))
+beta0 <- rnorm(nsims, 0, 100)
+beta1 <- rnorm(nsims, 0, 100)
+
+dsims <- tibble(log_gest_c = (log(ds$gest)-mean(log(ds$gest)))/sd(log(ds$gest)))
+
+for(i in 1:nsims){
+  this_mu <- beta0[i] + beta1[i]*dsims$log_gest_c 
+  dsims[paste0(i)] <- this_mu + rnorm(nrow(dsims), 0, sigma[i])
+}
+
+dsl <- dsims %>% 
+  pivot_longer(`1`:`10`, names_to = "sim", values_to = "sim_weight")
+
+dsl %>% 
+  ggplot(aes(sim_weight)) + geom_histogram(aes(y = ..density..), bins = 20, fill = "turquoise", color = "black") + 
+  xlim(c(-1000, 1000)) + 
+  geom_vline(xintercept = log(104), color = "purple", lwd = 1.2, lty = 2) + 
+  theme_bw(base_size = 16) + 
+  annotate("text", x=300, y=0.0022, label= "Anders'\ncurrent weight", 
+           color = "purple", size = 5) 
+```
+
+Clearly, babies are not that heavy --- they should be in the 1.0-5.0 range (perhaps stretching up to 8-9 kg at the most, or in some cases perhaps lower than 1.0 kg)
+
+### Weakly Informative Priors
+
+```{r}
+sigma <- abs(rnorm(nsims, 0, 1))
+beta0 <- rnorm(nsims, 0, 1)
+beta1 <- rnorm(nsims, 0, 1)
+
+dsims <- tibble(log_gest_c = (log(ds$gest)-mean(log(ds$gest)))/sd(log(ds$gest)))
+
+for(i in 1:nsims){
+  this_mu <- beta0[i] + beta1[i]*dsims$log_gest_c 
+  dsims[paste0(i)] <- this_mu + rnorm(nrow(dsims), 0, sigma[i])
+}
+
+dsl <- dsims %>% 
+  pivot_longer(`1`:`10`, names_to = "sim", values_to = "sim_weight")
+
+dsl %>% 
+  ggplot(aes(sim_weight)) + geom_histogram(aes(y = ..density..), bins = 20, fill = "turquoise", color = "black") + 
+  geom_vline(xintercept = log(104), color = "purple", lwd = 1.2, lty = 2) + 
+  theme_bw(base_size = 16) + 
+  annotate("text", x=8, y=0.2, label= "Anders'\ncurrent weight", color = "purple", size = 5)
+```
+
+### Running the models from Stan
+
+Skipped
+
+Formatting the data for the models
+
+```{r}
+ds$log_weight <- log(ds$birthweight)
+ds$log_gest_c <- (log(ds$gest) - mean(log(ds$gest)))/sd(log(ds$gest))
+
+N <- nrow(ds)
+log_weight <- ds$log_weight
+log_gest_c <- ds$log_gest_c 
+preterm <- ifelse(ds$preterm=="Y", 1, 0)
+
+# put into a list
+stan_data <- list(N = N,
+                  log_weight = log_weight,
+                  log_gest = log_gest_c, 
+                  preterm = preterm)
+```
+
+```{r}
+mod1 <- stan(data = stan_data, 
+             file = "models/simple_weight.stan",
+             iter = 500,
+             seed = 243)
+
+mod2 <- stan(data = stan_data, 
+             file = "models/simple_weight_preterm_int.stan",
+             iter = 500,
+             seed = 263)
+```
+```{r}
+summary(mod1)[["summary"]][c(paste0("beta[",1:2, "]"), "sigma"),]
+```
+
+```{r}
+summary(mod2)[["summary"]][c(paste0("beta[",1:4, "]"), "sigma"),]
+```
+
+### Running the Models In BRMS
+
+Why are we not using our priors?
+
+```{r}
+mod1b <- brm(log_weight~log_gest_c, data = ds)
+mod2b <- brm(log_weight~log_gest_c*preterm, data = ds)
+```
+
+## Posterior Predictive Checks
+
+```{r}
+set.seed(1856)
+y <- log_weight
+yrep1 <- rstan::extract(mod1)[["log_weight_rep"]]
+samp100 <- sample(nrow(yrep1), 100)
+ppc_dens_overlay(y, yrep1[samp100, ])  
+```
+
+```{r}
+yrep2 <- rstan::extract(mod2)[["log_weight_rep"]]
+ppc_dens_overlay(y, yrep2[samp100, ])  
+```
+
+Manual handling of the density plots:
+
+```{r}
+# first, get into a tibble
+rownames(yrep1) <- 1:nrow(yrep1)
+dr <- as_tibble(t(yrep1))
+dr <- dr %>% bind_cols(i = 1:N, log_weight_obs = log(ds$birthweight))
+
+# turn into long format; easier to plot
+dr <- dr %>% 
+  pivot_longer(-(i:log_weight_obs), names_to = "sim", values_to ="y_rep")
+
+# filter to just include 100 draws and plot!
+dr %>% 
+  filter(sim %in% samp100) %>% 
+  ggplot(aes(y_rep, group = sim)) + 
+  geom_density(alpha = 0.2, aes(color = "y_rep")) + 
+  geom_density(data = ds %>% mutate(sim = 1), 
+               aes(x = log(birthweight), col = "y")) + 
+  scale_color_manual(name = "", 
+                     values = c("y" = "darkblue", 
+                                "y_rep" = "lightblue")) + 
+  ggtitle("Distribution of observed and replicated birthweights") + 
+  theme_bw(base_size = 16)
+```
+
+```{r}
+ppc_stat(log_weight, yrep1, stat = 'median')
+```
+
+```{r}
+ppc_stat(log_weight, yrep2, stat = 'median')
+```
+
+Replicating the proportion of births less than 2.5 kg.
+
+```{r}
+t_y <- mean(y<=log(2.5))
+t_y_rep <- sapply(1:nrow(yrep1), function(i) mean(yrep1[i,]<=log(2.5)))
+t_y_rep_2 <- sapply(1:nrow(yrep2), function(i) mean(yrep2[i,]<=log(2.5)))
+
+ggplot(data = as_tibble(t_y_rep), aes(value)) + 
+    geom_histogram(aes(fill = "replicated")) + 
+    geom_vline(aes(xintercept = t_y, color = "observed"), lwd = 1.5) + 
+  ggtitle("Model 1: proportion of births less than 2.5kg") + 
+  theme_bw(base_size = 16) + 
+  scale_color_manual(name = "", 
+                     values = c("observed" = "darkblue"))+
+  scale_fill_manual(name = "", 
+                     values = c("replicated" = "lightblue")) 
+```
+
+```{r}
+ggplot(data = as_tibble(t_y_rep_2), aes(value)) + 
+    geom_histogram(aes(fill = "replicated")) + 
+    geom_vline(aes(xintercept = t_y, color = "observed"), lwd = 1.5) + 
+  ggtitle("Model 2: proportion of births less than 2.5kg") + 
+  theme_bw(base_size = 16) + 
+  scale_color_manual(name = "", 
+                     values = c("observed" = "darkblue"))+
+  scale_fill_manual(name = "", 
+                     values = c("replicated" = "lightblue")) 
+```
+
+## Posterior Predictions with brms
+
+```{r}
+yrep1b <- posterior_predict(mod1b)
+ds_yrep1 <- ds %>% 
+  select(log_weight, log_gest_c) %>% 
+  add_predicted_draws(mod1b)
+head(ds_yrep1)
+```
+
+```{r}
+pp_check(mod1b, type = "dens_overlay", nsamples = 100)
+```
+
+```{r}
+pp_check(mod1b, type = "stat", stat = 'median', nsamples = 100)
+```
+
+```{r}
+loglik1 <- rstan::extract(mod1)[["log_lik"]]
+loglik2 <- rstan::extract(mod2)[["log_lik"]]
+loo1 <- loo(loglik1, save_psis = TRUE)
+loo2 <- loo(loglik2, save_psis = TRUE)
+```
+
+```{r}
+loo_compare(loo1, loo2)
+```
+
+```{r}
+plot(loo1)
+```
+
+Plotting the LOO Probability Integral Transform (LOO-PIT).
+Looks to see where each point $y_i$ falls in its predictive distribution $p(y_i|y_{-i})$
+If the model is well calibrated, these should look like uniform distributions (spread evenly between 0 and 1).
+
+```{r}
+ppc_loo_pit_overlay(yrep = yrep1, y = y, lw = weights(loo1$psis_object)) + ggtitle("LOO-PIT Model 1")
+```
+
+```{r}
+ppc_loo_pit_overlay(yrep = yrep2, y = y, lw = weights(loo2$psis_object)) + ggtitle("LOO-PIT Model 2")
+```
+
+## LOO-CV with brms output
+
+```{r}
+loo1b <- loo(mod1b, save_psis = TRUE)
+loo2b <- loo(mod2b, save_psis = TRUE)
+loo_compare(loo1b, loo2b)
+```
+
+```{r}
+plot(loo1b)
+```
+
+```{r}
+ppc_loo_pit_overlay(yrep = yrep1b, y = y, lw = weights(loo1b$psis_object)) + ggtitle("LOO-PIT BRMS Model 1")
+
+```
+
+```{r}
+yrep2b <- posterior_predict(mod2b)
+
+ppc_loo_pit_overlay(yrep = yrep2b, y = y, lw = weights(loo2b$psis_object)) + ggtitle("LOO-PIT BRMS Model 2")
+
+```
+

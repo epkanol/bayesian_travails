@@ -1,0 +1,331 @@
+---
+title: "BRMS Tutorial - WAMBS"
+author: "Anders Sundelin"
+date: "2022-12-10"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(brms) # for the analysis
+library(haven) # to load the SPSS .sav file
+library(tidyverse) # needed for data manipulation.
+library(RColorBrewer) # needed for some extra colours in one of the graphs
+library(ggmcmc)
+library(mcmcplots) 
+```
+
+## When to worry, and how to Avoid Misuse of Bayesian Statistics
+
+Following the third tutorial by Rens van de Schoot: https://www.rensvandeschoot.com/brms-wambs/
+
+Simple WAMBS checklist:
+
+* **To be checked before estimating the model**
+    * Do you understand the priors? (seems like prior predictive checks)
+* **To be checked after estimation but before inspecting model results**
+    * Does the trace-plot exhibit convergence?
+    * Does convergence remain after doubling the number of iterations?
+    * Does the posterior distribution histogram have enough information?
+    * Do the chains exhibit a *strong degree* of autocorrelation?
+    * Do the posterior distributions make substantive sense?
+* **Understanding the exact influence of the priors**
+    * Do different specification of the multivariate variance priors influence the results?
+    * Is there a notable effect of the prior when compared with non-informative priors?
+    * Are the results stable from a sensitivity analysis?
+    * Is the Bayesian way of interpreting and reporting model results used?
+    
+    
+```{r ingest}
+popular2data <- read_sav(file  = "https://github.com/MultiLevelAnalysis/Datasets-third-edition-Multilevel-book/blob/master/chapter%202/popularity/SPSS/popular2.sav?raw=true")
+popular2data <- select(popular2data, pupil, class, extrav, sex, texp, popular) # we select just the variables we will use
+head(popular2data) # we have a look at the first 6 observations
+```
+
+## The Model
+
+```{r}
+get_prior(popular ~ 0 + Intercept + sex + extrav + texp + extrav:texp + (1 + extrav|class), data = popular2data)
+```
+
+We will be building the model:
+
+$Popularity_{ij} = \gamma_{00} + \gamma_{10} \cdot sex_{ij} + \gamma_{20} \cdot extraversion_{ij} + \gamma_{01} \cdot experience_j + \gamma_{21} \cdot extraversion_{ij} \cdot experience_j + u_{2j} \cdot extraversion_{ij} + u_{0j} + e_{ij}$
+
+```{r}
+get_prior(popular ~ 0 + Intercept + sex + extrav + texp + extrav:texp + (1 + extrav|class), data = popular2data)
+```
+
+We will only specify priors for:
+
+* The regression coefficient of extrav $\gamma_{20}$
+* The regression coefficient of sex $\gamma_{10}$
+* The regression coefficient of texp $\gamma_{01}$
+* The regression coefficient of extrav:texp $\gamma_{21}$
+* The intercept $\gamma_{00}$
+
+```{r}
+PRIORS <- c(set_prior("normal(0,5)",   class = "b", coef= "extrav"),
+            set_prior("normal(-1,.3)", class = "b", coef= "extrav:texp"),
+            set_prior("normal(2,.2)",  class = "b", coef= "sex"),
+            set_prior("normal(0,5)",   class = "b", coef= "texp"),
+            set_prior("cauchy(0,10)",  class = "b", coef = "Intercept" ))
+
+model <- brm(popular ~ 0 + Intercept + sex + extrav + texp + extrav:texp + (1 + extrav|class), 
+            data          = popular2data,
+            warmup        = 1000, 
+            iter          = 3000,
+            chains        = 4, 
+            control       = list(adapt_delta = 0.96), 
+            prior         = PRIORS,
+            save_all_pars = TRUE,
+            sample_prior  = TRUE,
+            cores         = 4,
+            backend       = "cmdstanr",
+            threads       = threading(2),
+            seed          = 123) 
+```
+
+### Does the trace-plot exhibit convergence?
+
+Transform the brms output into a long-format tibble, usable for plotting with ggplot.
+
+```{r}
+modeltranformed <- ggs(model) # the ggs function transforms the BRMS output into a longformat tibble, that we can use to make different types of plots.
+```
+Whoa - NAs introduced? Why is that?
+
+
+```{r}
+ggplot(filter(modeltranformed, Parameter %in% c("b_Intercept", "b_extrav", "b_sex", "b_extrav:texp", "b_texp", "sigma"),
+              Iteration > 1000),
+       aes(x   = Iteration,
+           y   = value, 
+           col = as.factor(Chain)))+
+  geom_line()+
+  facet_grid(Parameter ~ .,
+             scale  = 'free_y',
+             switch = 'y')+
+  labs(title = "Caterpillar Plots",
+       col   = "Chains")
+```
+
+Rstan can also plot caterpillars.
+
+```{r}
+stanplot(model, type = "trace")
+```
+
+Two convergence criteria:
+
+* The Gelman-Rubin Diagnostic shows the PSRF values (using the within and between chain variability). It is automatically given in the summary of brms under the column Rhat.
+* The Geweke Diagnostic shows the z-scores for a test of equality of means between the first and last parts of each chain, which should be <1.96. A separate statistic is calculated for each variable in each chain. In this way it check whether a chain has stabalized. If this is not the case, you should increase the number of iterations. In the plots you should check how often values exceed the boundary lines of the z-scores. Scores above 1.96 or below -1.96 mean that the two portions of the chain significantly differ and full chain convergence was not obtained.
+
+To obtain Gelman-Rubin diagnostic:
+
+```{r}
+modelposterior <- as.mcmc(model) # with the as.mcmc() command we can use all the CODA package convergence statistics and plotting options
+gelman.diag(modelposterior[, 1:5])
+```
+
+
+```{r}
+gelman.plot(modelposterior[, 1:5])
+```
+
+Obtain the Geweke diagnostic:
+
+```{r}
+geweke.diag(modelposterior[, 1:5])
+```
+
+```{r}
+geweke.plot(modelposterior[,1:5])
+```
+
+### Does convergence remain after doubling the number of iterations?
+
+```{r}
+modeldoubleniter <- brm(popular ~ 0 + Intercept + sex + extrav + texp + extrav:texp + (1 + extrav|class), 
+            data          = popular2data,
+            warmup        = 2000, 
+            iter          = 6000,
+            chains        = 4, 
+            control       = list(adapt_delta = 0.96), 
+            prior         = PRIORS,
+            save_all_pars = TRUE,
+            sample_prior  = TRUE,
+            cores         = 4,
+            backend       = "cmdstanr",
+            threads       = threading(2),
+            seed          = 123) 
+```
+
+```{r}
+modeldoubleniterposterior <- as.mcmc(modeldoubleniter)
+modelposterior <- as.mcmc(model) # with the as.mcmc() command we can use all the CODA package convergence statistics and plotting options
+gelman.diag(modeldoubleniterposterior[, 1:5])
+```
+
+```{r}
+gelman.plot(modeldoubleniterposterior[, 1:5])
+```
+Calculate the relative bias between the models with twice the number of iterations (in percentage format). Typically, you do not want to have more than 5% deviations here, but it also depends on the absolute (scale) value of the parameter.
+
+```{r}
+round(100*((summary(modeldoubleniter)$fixed - summary(model)$fixed) / summary(model)$fixed), 3)[,"Estimate"]
+```
+
+### Posterior Histogram
+
+```{r}
+stanplot(model, type = "hist")
+```
+
+The different posterior distributions seem to have single peakes and smooth slopes. Some are symmetrical, but this is not a hard requirement.
+
+### Autocorrelation Between Chains
+
+```{r}
+autocorr.diag(modelposterior[,1:5], lags = c(0, 1,2,3,4, 5, 10, 50))
+```
+After 4 iterations, there is still some autocorrelation. This is much, according to the home page. So we need to make sure that we have enough sample data, so we can explore the whole parameter space.
+
+### Do the Posterior Distributions Make Substansive Sense?
+
+```{r}
+ggplot(filter(modeltranformed, Parameter %in% c("b_Intercept", "b_extrav","b_sex"), 
+              Iteration > 1000),
+       aes(x    = value,
+           fill = Parameter))+
+  geom_density(alpha = .5)+
+  geom_vline(xintercept = 0,
+             col        = "red",
+             size       = 1)+
+  scale_x_continuous(name   = "Value",
+                     limits = c(-2.2, 1.5))+ 
+    geom_vline(xintercept = summary(model)$fixed[1,3], col = "darkgreen", linetype = 2)+
+    geom_vline(xintercept = summary(model)$fixed[2,3], col = "blue",      linetype = 2)+
+    geom_vline(xintercept = summary(model)$fixed[3,3], col = "red",       linetype = 2)+
+    geom_vline(xintercept = summary(model)$fixed[1,4], col = "darkgreen", linetype = 2)+
+    geom_vline(xintercept = summary(model)$fixed[2,4], col = "blue",      linetype = 2)+
+    geom_vline(xintercept = summary(model)$fixed[3,4], col = "red",       linetype = 2)+
+  theme_light()+
+   scale_fill_manual(name   =  'Parameters', 
+                     values = c("red","darkgreen" , "lightblue"), 
+                     labels = c(expression( " "  ~  gamma[Extraversion]), 
+                                expression( " "  ~  gamma[Intercept]),  
+                                expression( " "  ~  gamma[Sex])))+
+  labs(title = "Posterior Density of Parameters With 95% CCI lines (1)")
+```
+
+```{r}
+ggplot(filter(modeltranformed, 
+              Parameter %in% c("b_texp","b_extrav:texp"),
+              Iteration > 1000),
+       aes(x    = value,
+           fill = Parameter))+
+  geom_density(alpha = .5)+
+  geom_vline(xintercept = 0, 
+             col        = "red", 
+             size       = 1)+
+  coord_cartesian(ylim = c(0, 25))+
+    geom_vline(xintercept = summary(model)$fixed[4,3], col = "purple", linetype = 2)+
+    geom_vline(xintercept = summary(model)$fixed[5,3], col = "red",    linetype = 2)+
+    geom_vline(xintercept = summary(model)$fixed[4,4], col = "purple", linetype = 2)+
+    geom_vline(xintercept = summary(model)$fixed[5,4], col = "red",    linetype = 2)+
+  theme_light()+
+     scale_fill_manual(name   = 'Parameters', 
+                       values = c("Darkred","purple"), 
+                       labels = c(expression( " "  ~  gamma[extrav:texp]), 
+                                  expression( " "  ~  gamma[ texp])))+
+  labs(title = "Posterior Density of Parameters With 95% CCI lines (2)")
+```
+
+RStan can also plot --- though the function is now called `mcmc_plot`.
+
+```{r}
+mcmc_plot(model, variable = c("b_Intercept", "b_extrav","b_sex", "b_texp","b_extrav:texp"), type = "dens")
+```
+
+## Do different specification of the multivariate variance priors influence the results?
+
+BRMS have a default prior for standard deviations of group-level effects named `sd`, the correlations of group-level effects `cor` and the residual standard deviation `sigma`.
+
+In the manual, it is stated that:
+
+* The `sd` “parameters are restricted to be non-negative and, by default, have a half student-t prior with 3 degrees of freedom and a scale parameter that depends on the standard deviation of the response after applying the link function. Minimally, the scale parameter is 10.”
+* The `cor` prior `lkj_corr_cholesky(eta)` or in short `lkj(eta)` with `eta > 0` is essentially the only prior for (Cholesky factors) of correlation matrices. If eta = 1 (the default), all correlations matrices are equally likely a priori. If eta > 1, extreme correlations become less likely, whereas 0 < eta < 1 results in higher probabilities for extreme correlations.
+* By default, sigma has a half student-t prior that scales in the same way as the group-level standard deviations.
+
+We can choose other priors than the default ones, to see if this influence the results.
+
+```{r}
+PRIORS2 <- c(set_prior("normal(0,5)", class = "b", coef= "extrav"),
+            set_prior("normal(-1,.3)", class = "b", coef= "extrav:texp"),
+            set_prior("normal(2,.2)", class = "b", coef= "sex"),
+            set_prior("normal(0,5)", class = "b", coef= "texp"),
+            set_prior("cauchy(0,10)",  class = "b", coef = "Intercept" ),
+            set_prior("cauchy(0,2)", class = "sd"),          # a half cauchy distribution (truncuated at 0) for the sd
+            set_prior("lkj(2)", class = "cor"),              # a Cholesky of 2 for the correlation  
+            set_prior("inv_gamma(.5,.5)", class = "sigma")) # an uniformative inverse gamma for the sigma. 
+
+
+modeldifferentMVpriors <- brm(popular ~ 0 + Intercept + sex + extrav + texp + extrav:texp + (1 + extrav|class), 
+            data          = popular2data,
+            warmup        = 1000, 
+            iter          = 3000,
+            chains        = 4, 
+            control       = list(adapt_delta = 0.96), 
+            prior         = PRIORS2,
+            save_all_pars = TRUE,
+            sample_prior  = TRUE,
+            cores         = 4,
+            backend       = "cmdstanr",
+            threads       = threading(2),
+            seed          = 123) 
+```
+```{r}
+summary(modeldifferentMVpriors)
+```
+
+```{r}
+round(100*((summary(modeldifferentMVpriors)$fixed - summary(model)$fixed) / summary(model)$fixed), 3)[,"Estimate"]
+```
+
+## Is there a notable effect of the prior when compared with non-informative priors?
+
+```{r}
+PRIORSUNIFORMATIVE <- c(set_prior("normal(0,100)", class = "b", coef= "extrav"),
+            set_prior("normal(0,100)", class = "b", coef= "extrav:texp"),
+            set_prior("normal(0,100)", class = "b", coef= "sex"),
+            set_prior("normal(0,100)", class = "b", coef= "texp"),
+            set_prior("cauchy(0,10)",  class = "b", coef = "Intercept"))
+
+modeluninformativepriors<- brm(popular ~ 0 + Intercept + sex + extrav + texp + extrav:texp + (1 + extrav|class), 
+            data          = popular2data,
+            warmup        = 1000, 
+            iter          = 3000,
+            chains        = 4, 
+            control       = list(adapt_delta = 0.96), 
+            prior         = PRIORSUNIFORMATIVE,
+            save_all_pars = TRUE,
+            sample_prior  = TRUE,
+            cores         = 4,
+            backend       = "cmdstanr",
+            threads       = threading(2),
+            seed          = 123)
+summary(modeluninformativepriors)
+```
+
+```{r}
+round(100*((summary(modeluninformativepriors)$fixed - summary(model)$fixed) / summary(model)$fixed), 3)[,"Estimate"]
+```
+
+## Bayesian Interpretation and Reporting
+
+```{r}
+summary(model)
+```
+
+
