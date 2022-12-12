@@ -64,7 +64,60 @@ data %>% summarize(count = n(), mean(y), sd(y))
 data %>% filter(y > 0) %>% summarize(count = n(), mean(y), sd(y))
 ```
 
-### Prior Predictive Checks
+## Prior Predictive Checks
+
+Getting brms to tell us what priors it expects when it comes to our model boils down to using the `get_prior` function properly, understanding its output.
+
+```{r}
+get_prior(data=data,
+          family = zero_inflated_negbinomial,
+          formula = bf(y ~ 0 + (1 + author | team) + ADD + DUP, zi ~ 1 + ADD + DUP))
+```
+
+If I want to use `sample_prior = "only"`, in order to only let the priors influence the result, I also need to specify a specific prior for the zero-inflation `dpar` part.
+
+```{r}
+pp_model <- brm(data = data,
+      family = zero_inflated_negbinomial,
+      bf(y ~ 0 + (1 + author | team) + ADD + DUP,
+         zi ~ 1 + ADD + DUP),
+      prior = c(prior(normal(0, 0.2), class = b),
+                prior(normal(0, 0.2), class = b, dpar=zi),
+                prior(weibull(2, 1), class = sd),
+                prior(lkj(2), class = cor),
+                prior(gamma(0.01, 0.01), class = shape)),
+      sample_prior = "only",
+      warmup = 1000,
+      iter  = 4000,
+      chains = 4,
+      cores = 4,
+      backend="cmdstanr",
+      threads = threading(2),
+      adapt_delta = 0.95)
+```
+
+I'd say 6% divergent transitions show that we have some wild priors.
+Setting a stddev for the b-par of 0.2 instead of 0.25 decrease it to 4% divergent transitions.
+
+
+
+```{r}
+pp_check(pp_model)
+```
+
+```{r}
+pp_check(pp_model, type="error_hist", ndraws=11)
+```
+
+loo_pit will not work, NAs is produced.
+
+```{r}
+pp_check(pp_model, type="scatter_avg", ndraws=100)
+```
+
+We have some y values on the y axes that are reasonable, and some $y_{rep}$ values on the x axis that are totally wild.
+
+
 
 ### Null model
 ```{r}
@@ -88,7 +141,14 @@ data %>% filter(y > 0) %>% summarize(count = n(), mean(y), sd(y))
 ```
 
 ### Team Intercept, Author Slope
-```{r}
+
+We ignore this group-level model, where the teams groups the data, controllin the intercept, and the author controls the modification to that intercept.
+
+I still need to figure out what the significance of the population-level author is, and the author in the group.
+
+Basically, a group-level parameter can also occur on the population level - how should I think about this?
+
+```{r, eval=FALSE}
 set.seed(700716)
 m_nb <-
   brm(data = data,
@@ -100,7 +160,7 @@ m_nb <-
                 prior(beta(1, 1), class = zi),
                 prior(gamma(0.01, 0.01), class = shape)),
       warmup = 1000,
-      iter  = 4000,
+      iter  = 2000,
       chains = 4,
       backend="cmdstanr",
       threads = threading(2),
@@ -127,7 +187,7 @@ m_nb_add_dup <-
                 prior(beta(1, 1), class = zi),
                 prior(gamma(0.01, 0.01), class = shape)),
       warmup = 1000,
-      iter  = 4000,
+      iter  = 2000,
       chains = 4,
       cores = 4,
       backend="cmdstanr",
@@ -138,6 +198,8 @@ m_nb_add_dup <-
 ```{r}
 summary(m_nb_add_dup)
 ```
+
+We had one divergent transition, but we will move on to a more reasonable model, as the zero-inflation is highly influenced by additions and existing duplicates.
 
 ### Controlling the zero-inflation via parameters
 
@@ -153,6 +215,10 @@ Classes include:
 * `cor` --- a correlation matrix, for instance between intercepts and slopes (where we typically use an lkj)
 * `shape` --- a shape parameter to distributions such as the Gamma distribution
 
+We also remove the population-level author effect, leaving the author effect only inside the team (which controls the intercept).
+
+Zero-inflation is controlled only by the added lines and existing duplicates in the file (plus the base intercept of course).
+
 ```{r}
 set.seed(700716)
 m_zi_nb_add_dup <-
@@ -163,7 +229,6 @@ m_zi_nb_add_dup <-
       prior = c(prior(normal(0, 0.25), class = b),
                 prior(weibull(2, 1), class = sd),
                 prior(lkj(2), class = cor),
-#                prior(beta(1, 1), class = zi),
                 prior(gamma(0.01, 0.01), class = shape)),
       warmup = 1000,
       iter  = 4000,
@@ -190,9 +255,9 @@ summary(m_zi_nb_add_dup)
 ## Model Comparison
 
 
-```{r}
+```{r, eval=FALSE}
 m_nb <- add_criterion(m_nb, criterion = "loo")
-m_nb_add_dup <- add_criterion(m_nb_add_dup, criterion = "loo")
+m_zi_nb_add_dup <- add_criterion(m_zi_nb_add_dup, criterion = "loo")
 loo_compare(m_nb, m_nb_add_dup)
 ```
 
@@ -200,6 +265,7 @@ Adding ADD and DUP to our model have great effect.
 
 
 ```{r}
+m_nb_add_dup <- add_criterion(m_nb_add_dup, criterion = "loo")
 m_zi_nb_add_dup <- add_criterion(m_zi_nb_add_dup, criterion = "loo")
 loo_compare(m_zi_nb_add_dup, m_nb_add_dup)
 
@@ -243,8 +309,8 @@ mcmc_nuts_divergence(np, lp) # ok
 
 
 ```{r}
-loo(M) # ok
-
+loo_M <- loo(M, save_psis = TRUE) # ok
+print(loo_M)
 ```
 
 
@@ -262,8 +328,6 @@ r_2 <-
   rlkjcorr(1e4, K = 2, eta = 2) |>
   data.frame()
 
-# plot and compare
-# fairly strong negative correlations, and data has told its story
 post %>%
       ggplot() +
       geom_density(data = r_2, aes(x = X2),
@@ -277,9 +341,7 @@ post %>%
       scale_y_continuous(NULL, breaks = NULL) +
       labs(subtitle = "Correlation between intercepts and slopes, prior and posterior",
       x = "correlation")
-# it seems to be strong negative effects but we clearly see data has told its
-# story
-
+# we have moved towards slight positive correlation, around 0.4-0.6 or so
 ```
 
 ### Understanding Posterior Shape
@@ -292,18 +354,28 @@ mcmc_areas_ridges(M, regex_pars = "sd_team__")
 mcmc_areas_ridges(M, pars = c("r_team[1,author]","r_team[2,author]","r_team[3,author]", "r_team[4,author]","r_team[5,author]","r_team[6,author]","r_team[7,author]","r_team[8,author]","r_team[9,author]","r_team[10,author]","r_team[11,author]"), prob = 0.95)
 ```
 
+How shall I understand these parameters?
+
+
 ```{r}
 mcmc_areas_ridges(M, pars = c("r_team[1,Intercept]","r_team[2,Intercept]","r_team[3,Intercept]","r_team[4,Intercept]","r_team[5,Intercept]","r_team[6,Intercept]","r_team[7,Intercept]","r_team[8,Intercept]","r_team[9,Intercept]","r_team[10,Intercept]",
     "r_team[11,Intercept]"), prob = 0.95)
 ```
 
+We see some teams that have very wide distributions for the intercept. But many teams have firmly negative intercepts.
+
 ```{r}
 mcmc_areas_ridges(M, regex_pars = "^b_")
 ```
 
-```{r}
+The Zero-Inflation parameters dominate. For a small change (ADD is close to 0), the highly positive zi-intercept will make it unlikely to be any duplicates added.
+But, for bigger changes (ADD close to 1 stddev) will cancel out the intercept, and then it will be the number of duplicates that control whether there is any issues added.
+
+```{r, eval=FALSE}
 pp_check(M, type = "error_hist", ndraws = 11)
 ```
+I really have to understand these checks.
+
 
 ```{r}
 pp_check(M, type = "loo_pit")
@@ -319,7 +391,11 @@ Let's predict what the model says about a new change that comes in.
 If we let author 5 in team 7 add 30 lines to file 17, which had 6 existing duplicated blocks, how likely is s/he to introduce duplicates?
 
 
+### Posterior predictions of the linear parameter
+
 posterior_linpred uses draws of the linear predictor (before any link function has been applied).
+
+We plot the value of an imaginary change to file 17, by author 5, belonging to team 7, comprising 30 changed lines, and the file has 6 existing duplicates.
 
 ```{r}
 newdata <- data.frame(t(c(file=17, author=5, team=7, ADD=30/scale_added$stddev, DUP=6/scale_dupblocks$stddev)))
@@ -334,11 +410,12 @@ So, this is on the logit scale - the linear part, before linking.
 issues_linpred |> ggplot(aes(x=.linpred)) + stat_halfeye() + scale_x_continuous()
 ```
 
-```{r}
-data |> group_by(team, author) |> tally() |> head(10)
-```
+Question - as we are dealing with a multi-model, is this linear prediction related to the zero-inflation part, or the lambda (rate & shape) part?
+The value of -1 seems to indicate that zero-inflation plays a part
 
-epred draws returns the expected value of the parameter
+### Posterior predictions of the expected parameter value
+
+epred draws returns the expected value of the parameter (what parameter?)
 
 ```{r}
 issues_epred <- M |> epred_draws(newdata=newdata)
@@ -346,8 +423,11 @@ issues_epred |> ggplot(aes(x=.epred)) + stat_halfeye() + scale_x_continuous()
 
 ```
 
+### Posterior predictions on the outcome (y) scale
+
 And in the predicted_draws we have the probabilities on the outcome scale.
-We see the high probability of zero issues being introduced, with correspondingly fewer
+We see the high probability of zero issues being introduced, with correspondingly lesser probability of introducing 1, 2, 3,... issues.
+
 ```{r}
 issues_predicted <- M |> predicted_draws(newdata=newdata)
 issues_predicted |> ggplot(aes(x=.prediction)) + stat_halfeye() + scale_x_continuous()
@@ -356,7 +436,7 @@ issues_predicted |> ggplot(aes(x=.prediction)) + stat_halfeye() + scale_x_contin
 
 ### Author effects
 
-If we look at the author who introduced the most issues, relative to the number of files that had
+If we look at the author who introduced the most issues, in absolute and relative terms.
 
 ```{r}
 data %>% group_by(author) %>% summarize(issues = sum(y)) %>% arrange(desc(issues)) %>% head(5)
@@ -366,11 +446,22 @@ data %>% group_by(author) %>% summarize(issues = sum(y)) %>% arrange(desc(issues
 data %>% filter(y > 0) %>% group_by(author) %>% summarize(relissues = sum(y)/n()) %>% arrange(desc(relissues)) %>% head(5)
 ```
 
-So, we see that author 10 introduced the most issues overall (121), but relative to the number of issues introduced per file (that was not zero), the highest number of issues came from author 68.
+So, we see that author 10 introduced the most issues overall (121), but relative to the number of issues introduced per file (that had issues introduced), the highest number of issues came from author 68.
+
+
+Finding authors that introduce few issues are harder. We have to look at all the changes (also those files with y == 0), and see the relative weight of the number of introduced issues per file.
+
+```{r}
+data %>% group_by(author) %>% summarize(relissues = sum(y)/n(), sum(y), count=n()) %>% arrange(desc(relissues)) %>% tail(30)
+
+```
+
+Author 17 and 6 never introduced any issues, yet changed 411 and 393 files, respectively. They could be considered "good examples".
+
 
 How do these compare?
 
-Base, random author:
+Base, random author, random team:
 
 ```{r}
 newdata <- data.frame(t(c(file=17, author=5, team=7, ADD=30/scale_added$stddev, DUP=6/scale_dupblocks$stddev)))
@@ -421,7 +512,7 @@ data %>% group_by(team) %>% summarize(fileschanged = n()) %>% arrange(desc(files
 
 ```
 
-Team 6 have changed about a third of the files in the repo, but are still the top 3 team for introducing duplicates.
+Team 6 have changed about a third of the files of the maximum team, but are still the top 3 team for introducing duplicates.
 How do our authors fare if we put them in that team?
 
 ```{r}
@@ -440,8 +531,68 @@ predicted_author68_team6 |> ggplot(aes(x=.prediction)) + stat_halfeye() + scale_
 
 ```
 
+Putting author 68 into team 2, doing a larger change of 300 lines, in a file with 6 existing duplicates mean that there would be around 18% probability of introducing a duplicate, and around 3% of introducing 5.
+
+```{r}
+newdata <- data.frame(t(c(file=17, author=68, team=2, ADD=300/scale_added$stddev, DUP=6/scale_dupblocks$stddev)))
+predicted_author68_team6 <- M |> predicted_draws(newdata=newdata)
+predicted_author68_team6 |> ggplot(aes(x=.prediction)) + stat_halfeye() + scale_x_continuous() + coord_cartesian(ylim=c(0,0.2))
+
+```
+
+If we instead put author 68 into "the bad team" - team 6, the picture becomes radically different. There is much more probability to add up to 25 issues (with the extremes up to 100, which probably is an exaggeration). The point is that the team 6 change caused the probabilities to radically change.
+
+```{r}
+newdata <- data.frame(t(c(file=17, author=68, team=6, ADD=300/scale_added$stddev, DUP=6/scale_dupblocks$stddev)))
+predicted_author68_team6 <- M |> predicted_draws(newdata=newdata)
+predicted_author68_team6 |> ggplot(aes(x=.prediction)) + stat_halfeye() + scale_x_continuous() + coord_cartesian(ylim=c(0,0.2))
+
+```
+
+If we instead look at the same change, from the perspective of authors that never introduced any issue:
+
+```{r}
+newdata <- data.frame(t(c(file=17, author=17, team=6, ADD=300/scale_added$stddev, DUP=6/scale_dupblocks$stddev)))
+predicted_author68_team6 <- M |> predicted_draws(newdata=newdata)
+predicted_author68_team6 |> ggplot(aes(x=.prediction)) + stat_halfeye() + scale_x_continuous() + coord_cartesian(ylim=c(0,0.2))
+
+```
+
+```{r}
+newdata <- data.frame(t(c(file=17, author=17, team=2, ADD=300/scale_added$stddev, DUP=6/scale_dupblocks$stddev)))
+predicted_author68_team6 <- M |> predicted_draws(newdata=newdata)
+predicted_author68_team6 |> ggplot(aes(x=.prediction)) + stat_halfeye() + scale_x_continuous() + coord_cartesian(ylim=c(0,0.2))
+
+```
+
+
 So, clearly, the model thinks that putting author 68 in team 6 will make it much more likely for issues to appear!
 Both the width and the height of the probabilities increase a lot with team 6, relative to the original team 7.
+
+
+### Conditional Effects
+
+Following on https://www.andrewheiss.com/blog/2022/11/29/conditional-marginal-marginaleffects/
+
+"Fixed effects" in multilevel models are not the same as "fixed effects" in econometrics.
+
+Marginal effects in single-level models are the change in the outcome while moving one of the explanatory variables, while holding the others constant.
+
+But Multilevel Marginal Effects are different than these two.
+In multilevel models, you calculate both *marginal effects* and *conditional effects*. Neither are necessary related to slopes, though they can be.
+
+In a model looking like `mod <- brm(y ~ x1 + x2 + (1 | child), data=d)`, we have a dataset with child-based clusters (repeated observations of each child over time), and are fitting some parameters to the data, based on both population-level variables (`x1` and `x2`), and group-based variables (intercept per child, in this case).
+
+* **Conditional effect** is the effect on the average child
+* **Marginal effect** is the effect on *children on average*
+
+For *Conditional Effects* we set all group-specific random offsets to 0, to find the effect for a *typical* group/subject/student/child.
+
+For *Marginal Effects*, we are looking at the *global population-level average effect*, where group-specific differences are averaged out, or integrated out, or held constant.
+
+```{r}
+plot(conditional_effects(M, points=T, ask=F))
+```
 
 
 Playing around with newdata. we can let the model predict the likelihood of issues being introduced.
