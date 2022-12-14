@@ -14,7 +14,8 @@ library(dplyr)
 library(brms)
 library(dagitty)
 library(stringr)
-library(rethinking)
+# we should not load rethinking at the same time as brms, as they share some function names which might cause issues
+#library(rethinking)
 library(bayesplot)
 library(tidybayes)
 library(distributional)
@@ -34,7 +35,9 @@ scale_dupblocks <- data.frame(t(c(count=1771, mean=0.9994353, stddev=3.071005, m
 scale_added <- df %>% summarize(count=n(), mean=mean(added), stddev=sd(added), median=median(added))
 scale_removed <- df %>% summarize(count=n(), mean=mean(removed), stddev=sd(removed), median=median(removed))
 
-data_centered <- df %>% mutate(file=fileid, author=authorid, team=authorteamid,
+data_centered <- df %>% mutate(file=fileid,
+                               author=as.factor(authorid),
+                               team=as.factor(authorteamid),
                                ISTEST=istestfile,
                                ADD=(added-scale_added$mean)/scale_added$stddev,
                                DEL=(removed-scale_removed$mean)/scale_removed$stddev,
@@ -46,7 +49,9 @@ data_centered <- df %>% mutate(file=fileid, author=authorid, team=authorteamid,
                                y=INTROD) %>%
   select(file, author, team, ADD, DUP, y)
 
-data_scaled <- df %>% mutate(file=fileid, author=authorid, team=authorteamid,
+data_scaled <- df %>% mutate(file=fileid,
+                             author=as.factor(authorid),
+                             team=as.factor(authorteamid),
                              ISTEST=istestfile,
                              ADD=(added)/scale_added$stddev,
                              DEL=(removed)/scale_removed$stddev,
@@ -57,7 +62,7 @@ data_scaled <- df %>% mutate(file=fileid, author=authorid, team=authorteamid,
                              REMOVED=if_else(delta <= 0, delta, as.integer(0)),
                              y=INTROD) %>%
   select(file, author, team, ADD, DUP, y)
-data <- data_scaled
+data <- data_centered
 
 data %>% summarize(count = n(), mean(y), sd(y))
 
@@ -66,25 +71,48 @@ data %>% filter(y > 0) %>% summarize(count = n(), mean(y), sd(y))
 
 ## Prior Predictive Checks
 
+This is one informative reply thread:
+
+https://discourse.mc-stan.org/t/help-understanding-and-setting-informative-priors-in-brms/9574/7
+
 Getting brms to tell us what priors it expects when it comes to our model boils down to using the `get_prior` function properly, understanding its output.
 
 ```{r}
 get_prior(data=data,
           family = zero_inflated_negbinomial,
-          formula = bf(y ~ 0 + (1 + author | team) + ADD + DUP, zi ~ 1 + ADD + DUP))
+          formula = bf(y ~ 0 + author + (1 + author | team) + ADD + DUP, zi ~ 1 + ADD + DUP))
 ```
+
+```{r}
+a_intercept <- rnorm(1000, 0, 0.25)
+a_beta <- rnorm(1000, 0, 0.25)
+d_beta <- rnorm(1000, 0, 0.25)
+zero_infl <- a_intercept + a_beta * data$ADD + d_beta * data$DUP
+
+summary(zero_infl)
+
+p <- inv_logit_scaled(zero_infl)
+summary(p)
+data.frame(p=p) |> ggplot(aes(x=p)) + geom_histogram(bins=50)
+```
+
+```{r}
+shape = rgamma(1000, 0.01, 0.01)
+intercept_team <- rstudent(1000, 3, 0, 2.5)
+
+```
+
 
 If I want to use `sample_prior = "only"`, in order to only let the priors influence the result, I also need to specify a specific prior for the zero-inflation `dpar` part.
 
 ```{r}
 pp_model <- brm(data = data,
       family = zero_inflated_negbinomial,
-      bf(y ~ 0 + (1 + author | team) + ADD + DUP,
+      bf(y ~ 0 + (1 | team) + (1 | author) + ADD + DUP,
          zi ~ 1 + ADD + DUP),
-      prior = c(prior(normal(0, 0.2), class = b),
-                prior(normal(0, 0.2), class = b, dpar=zi),
+      prior = c(prior(normal(0, 0.25), class = b),
+                prior(normal(0, 0.25), class = b, dpar=zi),
                 prior(weibull(2, 1), class = sd),
-                prior(lkj(2), class = cor),
                 prior(gamma(0.01, 0.01), class = shape)),
       sample_prior = "only",
       warmup = 1000,
@@ -92,17 +120,23 @@ pp_model <- brm(data = data,
       chains = 4,
       cores = 4,
       backend="cmdstanr",
-      threads = threading(2),
-      adapt_delta = 0.95)
+      threads = threading(4),
+      adapt_delta = 0.99999)
 ```
+
+```{r}
+yrep1b <- posterior_predict(pp_model)
+```
+
+
 
 I'd say 6% divergent transitions show that we have some wild priors.
 Setting a stddev for the b-par of 0.2 instead of 0.25 decrease it to 4% divergent transitions.
 
 
 
-```{r}
-pp_check(pp_model)
+```{r, eval=FALSE}
+pp_check(pp_model, type = 'stat', stat='mean')
 ```
 
 ```{r}
@@ -115,8 +149,8 @@ loo_pit will not work, NAs is produced.
 pp_check(pp_model, type="scatter_avg", ndraws=100)
 ```
 
-We have some y values on the y axes that are reasonable, and some $y_{rep}$ values on the x axis that are totally wild.
-
+We have some y values on the y axes that are reasonable, and some $y_{rep}$ values on the x axis that are totally wild (> 500).
+Still, this proves that should these values appear in our data, our model would detect them.
 
 
 ### Null model
@@ -140,23 +174,18 @@ We have some y values on the y axes that are reasonable, and some $y_{rep}$ valu
 #       chains = 4, cores = 4, threads = threading(2), sample_prior = "only")
 ```
 
-### Team Intercept, Author Slope
+### Team Intercept
 
-We ignore this group-level model, where the teams groups the data, controllin the intercept, and the author controls the modification to that intercept.
-
-I still need to figure out what the significance of the population-level author is, and the author in the group.
-
-Basically, a group-level parameter can also occur on the population level - how should I think about this?
+Only modelling the introduction ratio based on the team - no other predictors are used.
 
 ```{r, eval=FALSE}
 set.seed(700716)
 m_nb <-
   brm(data = data,
       family = zero_inflated_negbinomial,
-      y ~ 0 + author + (1 + author | team),
-      prior = c(prior(normal(0, 0.5), class = b),
+      y ~ 0 + (1 | team),
+      prior = c(
                 prior(weibull(2, 1), class = sd),
-                prior(lkj(2), class = cor),
                 prior(beta(1, 1), class = zi),
                 prior(gamma(0.01, 0.01), class = shape)),
       warmup = 1000,
@@ -167,6 +196,8 @@ m_nb <-
       cores = 4)
 
 ```
+
+
 ### Team Intercept, Author Slope, Additions and Existing Duplicates
 
 This model assumes a fixed zero-inflation probability for all files and changes.
@@ -180,10 +211,9 @@ set.seed(700716)
 m_nb_add_dup <-
   brm(data = data,
       family = zero_inflated_negbinomial,
-      y ~ 0 + author + (1 + author | team) + ADD + DUP,
+      y ~ 0 + author + (1 | team) + ADD + DUP,
       prior = c(prior(normal(0, 0.25), class = b),
                 prior(weibull(2, 1), class = sd),
-                prior(lkj(2), class = cor),
                 prior(beta(1, 1), class = zi),
                 prior(gamma(0.01, 0.01), class = shape)),
       warmup = 1000,
@@ -198,8 +228,7 @@ m_nb_add_dup <-
 ```{r}
 summary(m_nb_add_dup)
 ```
-
-We had one divergent transition, but we will move on to a more reasonable model, as the zero-inflation is highly influenced by additions and existing duplicates.
+Not much impact from the generic author concept
 
 ### Controlling the zero-inflation via parameters
 
@@ -215,7 +244,9 @@ Classes include:
 * `cor` --- a correlation matrix, for instance between intercepts and slopes (where we typically use an lkj)
 * `shape` --- a shape parameter to distributions such as the Gamma distribution
 
-We also remove the population-level author effect, leaving the author effect only inside the team (which controls the intercept).
+We also remove the population-level author effect, adding one grouping effect (intercept only) on the author effect, and one on the team (also only intercept).
+If we had reason to believe that certain authors or teams were sensitive to ADD or DUP effects, we could add them into the grouping effects.
+In that case, we would also have to add the LKJ prior for correlations between the intercept and the slope.
 
 Zero-inflation is controlled only by the added lines and existing duplicates in the file (plus the base intercept of course).
 
@@ -224,11 +255,12 @@ set.seed(700716)
 m_zi_nb_add_dup <-
   brm(data = data,
       family = zero_inflated_negbinomial,
-      bf(y ~ 0 + (1 + author | team) + ADD + DUP,
+      bf(y ~ 0 + (1 | author) + (1 | team) + ADD + DUP,
          zi ~ 1 + ADD + DUP),
       prior = c(prior(normal(0, 0.25), class = b),
+                prior(normal(0, 0.25), class = b, dpar=zi),
                 prior(weibull(2, 1), class = sd),
-                prior(lkj(2), class = cor),
+#                prior(lkj(2), class = cor),
                 prior(gamma(0.01, 0.01), class = shape)),
       warmup = 1000,
       iter  = 4000,
@@ -238,11 +270,15 @@ m_zi_nb_add_dup <-
       threads = threading(2),
       adapt_delta = 0.95)
 ```
+```{r}
+
+```
+
 
 
 
 ```{r}
-get_prior(formula = bf(y ~ 0 + author + (1 + author | team) + ADD + DUP, zi ~ 1 + ADD + DUP),
+get_prior(formula = bf(y ~ 0 + (1 + author) + (1 | team) + ADD + DUP, zi ~ 1 + ADD + DUP),
           data=data,
           family=zero_inflated_negbinomial)
 ```
@@ -254,6 +290,7 @@ summary(m_zi_nb_add_dup)
 
 ## Model Comparison
 
+Can I really use LOO to compare NegBinomial models (Gamma-Poisson)? As these are a mixture of different Poisson processes (shape varies per row of data), they cannot be aggregated like other data.
 
 ```{r, eval=FALSE}
 m_nb <- add_criterion(m_nb, criterion = "loo")
@@ -323,7 +360,9 @@ post <- as_draws_df(M)
 
 ```
 
-```{r}
+```{r, eval=FALSE}
+
+# we do not have any correlation matrices in our model yet... Would be, if we added ADD or DUP as group-level effects...
 r_2 <-
   rlkjcorr(1e4, K = 2, eta = 2) |>
   data.frame()
@@ -347,22 +386,60 @@ post %>%
 ### Understanding Posterior Shape
 
 ```{r}
-mcmc_areas_ridges(M, regex_pars = "sd_team__")
+mcmc_areas_ridges(M, regex_pars = "sd_")
 ```
 
 ```{r}
-mcmc_areas_ridges(M, pars = c("r_team[1,author]","r_team[2,author]","r_team[3,author]", "r_team[4,author]","r_team[5,author]","r_team[6,author]","r_team[7,author]","r_team[8,author]","r_team[9,author]","r_team[10,author]","r_team[11,author]"), prob = 0.95)
+mcmc_areas_ridges(M, regex_pars = "r_team", prob = 0.95)
 ```
 
-How shall I understand these parameters?
+How shall I understand these parameters? It is clear that team 11 have a very wide intercept, which is because it only produced a few rows of data. Otherwise the team intercepts lie mostly between -1 and -2 or so.
 
 
 ```{r}
-mcmc_areas_ridges(M, pars = c("r_team[1,Intercept]","r_team[2,Intercept]","r_team[3,Intercept]","r_team[4,Intercept]","r_team[5,Intercept]","r_team[6,Intercept]","r_team[7,Intercept]","r_team[8,Intercept]","r_team[9,Intercept]","r_team[10,Intercept]",
-    "r_team[11,Intercept]"), prob = 0.95)
+mcmc_areas_ridges(M, regex_pars = "r_author\\[[1-9],Intercept\\]", prob = 0.95)
 ```
 
-We see some teams that have very wide distributions for the intercept. But many teams have firmly negative intercepts.
+```{r}
+mcmc_areas_ridges(M, regex_pars = "r_author\\[1[0-9],Intercept\\]", prob = 0.95)
+```
+
+```{r}
+mcmc_areas_ridges(M, regex_pars = "r_author\\[2[0-9],Intercept\\]", prob = 0.95)
+```
+
+```{r}
+mcmc_areas_ridges(M, regex_pars = "r_author\\[3[0-9],Intercept\\]", prob = 0.95)
+```
+
+```{r}
+mcmc_areas_ridges(M, regex_pars = "r_author\\[4[0-9],Intercept\\]", prob = 0.95)
+```
+
+```{r}
+mcmc_areas_ridges(M, regex_pars = "r_author\\[5[0-9],Intercept\\]", prob = 0.95)
+```
+
+```{r}
+mcmc_areas_ridges(M, regex_pars = "r_author\\[6[0-9],Intercept\\]", prob = 0.95)
+```
+
+Some authors (e.g. 10, 40, 43) have highly positive intercepts, while others have negative (e.g. 6, 24, 35, 59). Others are more unsure (e.g. 50, 60) and have a wide plausible span.
+
+Lets see why this is the case:
+
+```{r}
+data |> filter(author %in% c(10, 40, 6, 24, 50, 60)) |> group_by(author) |> tally()
+```
+
+```{r}
+data |> filter(author %in% c(10, 40, 6, 24, 50, 60)) |> group_by(author) |> ggplot(aes(y=y)) + geom_boxplot() + facet_wrap(~ author)
+```
+
+As we suspect, the unsure distributions have few data, and it seems they have all zeros - no data to build the rate on.
+
+The authors with the highly negative intercepts seem to have introduced much less issues than the ones with the highly positive ones. Also expected - higher rates mean more issues introduced.
+
 
 ```{r}
 mcmc_areas_ridges(M, regex_pars = "^b_")
@@ -371,16 +448,90 @@ mcmc_areas_ridges(M, regex_pars = "^b_")
 The Zero-Inflation parameters dominate. For a small change (ADD is close to 0), the highly positive zi-intercept will make it unlikely to be any duplicates added.
 But, for bigger changes (ADD close to 1 stddev) will cancel out the intercept, and then it will be the number of duplicates that control whether there is any issues added.
 
+
+```{r}
+pp_check(M, type = "dens_overlay", ndraws = 1e4)
+```
+
+
 ```{r, eval=FALSE}
 pp_check(M, type = "error_hist", ndraws = 11)
 ```
 I really have to understand these checks.
 
 
+LOO_PIT is not to be used for zero-inflated neg-binomial distributions. See https://discourse.mc-stan.org/t/worst-loo-pit-plots-ever-pp-checks-great/18789
+
 ```{r}
 pp_check(M, type = "loo_pit")
+```
+
+For count data, we should use rootograms instead, preferably in style suspended.
+
+https://mc-stan.org/bayesplot/reference/PPC-discrete.html
+https://fromthebottomoftheheap.net/2016/06/07/rootograms/
+```{r}
+yrep <- m_factors |> predicted_draws()
+ppc_rootogram(data$y, yrep)
+```
+
+```{r}
+r <- residuals(M, method="posterior_predict") %>% as_tibble() %>% bind_cols(data)
+```
+
+```{r}
+r |> arrange(desc(abs(Estimate))) %>% head(20)
+r |> select(Estimate, y) |> ggplot(aes(x=Estimate, y=y)) + geom_point(size=2, alpha=2/3)
 
 ```
+
+We have some prediction that are totally out of the reasonable (estimating 150k issues). These come from files that have unusually large additions (35 and 24 standard deviations, respectively).
+
+```{r}
+r |> arrange(desc(abs(ADD))) %>% head(10)
+```
+
+We see that the maximum error occurs when we have the highest add values. This could indicate that we have some other effect, not yet in the model, that affects the introduction of issues. For instance, copying rather than writing new files from scratch.
+
+So we should not trust that our model behaves well when ADD are at its larger values (above 10-12 sd or so). With more informed priors (tighter at the ends), we could most likely reduce the error more.
+
+```{r}
+pred <- posterior_predict(M)
+```
+
+```{r}
+newdata <- data.frame(t(c(file=17, author=40, team=6, ADD=30/scale_added$stddev, DUP=6/scale_dupblocks$stddev)))
+
+issues_predicted <- M |> predicted_draws(newdata=newdata)
+issues_predicted |> ggplot(aes(x=.prediction)) + geom_histogram(aes(y=after_stat(count/sum(count))), binwidth = 1) + scale_y_continuous(labels=scales::percent)
+
+```
+
+```{r}
+newdata <- data.frame(t(c(file=17, author=40, team=2, ADD=30/scale_added$stddev, DUP=6/scale_dupblocks$stddev)))
+
+M |> predicted_draws(newdata=newdata) |> ggplot(aes(x=.prediction)) + geom_histogram(aes(y=after_stat(count/sum(count))), binwidth = 1) + scale_y_continuous(labels=scales::percent)
+
+```
+
+If we look at the effects of putting author 6 in these two teams:
+
+```{r}
+newdata <- data.frame(t(c(file=17, author=6, team=6, ADD=30/scale_added$stddev, DUP=6/scale_dupblocks$stddev)))
+
+M |> predicted_draws(newdata=newdata) |> ggplot(aes(x=.prediction)) + geom_histogram(aes(y=after_stat(count/sum(count))), binwidth = 1) + scale_y_continuous(labels=scales::percent)
+
+```
+
+
+```{r}
+newdata <- data.frame(t(c(file=17, author=6, team=2, ADD=30/scale_added$stddev, DUP=6/scale_dupblocks$stddev)))
+
+M |> predicted_draws(newdata=newdata) |> ggplot(aes(x=.prediction)) + geom_histogram(aes(y=after_stat(count/sum(count))), binwidth = 1) + scale_y_continuous(labels=scales::percent)
+
+```
+
+The model thinks that putting author 6 in team 2 would wield over 95% chance of not introducing any issues, given adding 30 lines to a file that already contained 6 duplicated blocks.
 
 
 ## Posterior predictions
@@ -464,8 +615,8 @@ How do these compare?
 Base, random author, random team:
 
 ```{r}
-newdata <- data.frame(t(c(file=17, author=5, team=7, ADD=30/scale_added$stddev, DUP=6/scale_dupblocks$stddev)))
-M |> predicted_draws(newdata=newdata) |> ggplot(aes(x=.prediction)) + stat_halfeye() + scale_x_continuous() + coord_cartesian(ylim=c(0,0.1))
+newdata <- data.frame(t(c(author=99, team=6, ADD=300/scale_added$stddev, DUP=6/scale_dupblocks$stddev)))
+M |> predicted_draws(newdata=newdata) |> ggplot(aes(x=.prediction)) + stat_halfeye() + scale_x_continuous() #+ coord_cartesian(ylim=c(0,0.1))
 ```
 
 

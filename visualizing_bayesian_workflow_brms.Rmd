@@ -101,15 +101,19 @@ sigma <- 1 / sqrt(rgamma(nsims, 1, rate = 100))
 beta0 <- rnorm(nsims, 0, 100)
 beta1 <- rnorm(nsims, 0, 100)
 
+# scale and center outcome (comes from the real data)
 dsims <- tibble(log_gest_c = (log(ds$gest)-mean(log(ds$gest)))/sd(log(ds$gest)))
 
+# build the parameter, based on the simulated priors (sigma, beta0/beta1 above)
 for(i in 1:nsims){
+  # calculate new mean value
   this_mu <- beta0[i] + beta1[i]*dsims$log_gest_c 
+  # create a new column, with as many rows as dsims, and contents of new mean value, plus or minus a value corresponding to the stddev
   dsims[paste0(i)] <- this_mu + rnorm(nrow(dsims), 0, sigma[i])
 }
 
 dsl <- dsims %>% 
-  pivot_longer(`1`:`10`, names_to = "sim", values_to = "sim_weight")
+  pivot_longer(`1`:`100`, names_to = "sim", values_to = "sim_weight")
 
 dsl %>% 
   ggplot(aes(sim_weight)) + geom_histogram(aes(y = ..density..), bins = 20, fill = "turquoise", color = "black") + 
@@ -137,7 +141,7 @@ for(i in 1:nsims){
 }
 
 dsl <- dsims %>% 
-  pivot_longer(`1`:`10`, names_to = "sim", values_to = "sim_weight")
+  pivot_longer(`1`:`100`, names_to = "sim", values_to = "sim_weight")
 
 dsl %>% 
   ggplot(aes(sim_weight)) + geom_histogram(aes(y = ..density..), bins = 20, fill = "turquoise", color = "black") + 
@@ -189,7 +193,7 @@ summary(mod2)[["summary"]][c(paste0("beta[",1:4, "]"), "sigma"),]
 
 ### Running the Models In BRMS
 
-Why are we not using our priors?
+Why are we not using our priors? Instead, we are using BRMS's deafult priors. 
 
 ```{r}
 mod1b <- brm(log_weight~log_gest_c, data = ds)
