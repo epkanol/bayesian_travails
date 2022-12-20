@@ -1,0 +1,333 @@
+---
+title: "Model"
+author: "Anders Sundelin"
+date: "2022-12-14"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+library(brms)
+library(tidybayes)
+library(bayesplot)
+```
+
+## Data Ingestion and Model Building
+
+Models are cached in subdirectory, but they will take a few minutes each to complete the first time. 
+You might need to remove the cached models when changing some parameters (though formula or data changes are usually detected by brms).
+
+```{r ingest}
+df <- read.csv("samples/authors-team-impact.csv")
+
+scale_cloc      <- data.frame(t(c(count=1771, mean=123.6285, stddev=303.9526, median=56)))
+scale_mccabe    <- data.frame(t(c(count=1771, mean=13.70073, stddev=40.93051, median=5)))
+scale_duplines  <- data.frame(t(c(count=1771, mean=18.04743, stddev=59.00211, median=0)))
+scale_dupblocks <- data.frame(t(c(count=1771, mean=0.9994353, stddev=3.071005, median=0)))
+scale_added <- df %>% summarize(count=n(), mean=mean(added), stddev=sd(added), median=median(added))
+scale_removed <- df %>% summarize(count=n(), mean=mean(removed), stddev=sd(removed), median=median(removed))
+
+data_scaled <- df %>% mutate(file=as.factor(fileid),
+                             author=as.factor(authorid),
+                             team=as.factor(authorteamid),
+                             ISTEST=istestfile,
+                             ADD=(added)/scale_added$stddev,
+                             DEL=(removed)/scale_removed$stddev,
+                             CLOC=(currCloc)/scale_cloc$stddev,
+                             COMPLEX=(currComplex)/scale_mccabe$stddev,
+                             COMPLEX_DELTA=(currComplex - prevComplex)/scale_mccabe$stddev,
+                             NEWFILE=if_else(prevCloc == 0, TRUE, FALSE),
+                             DELFILE=if_else(currCloc == 0, TRUE, FALSE),
+                             DUP=(prevDupBlocks)/scale_dupblocks$stddev,
+                             INTROD=if_else(delta >= 0, delta, as.integer(0)),
+                             REMOVED=if_else(delta <= 0, abs(delta), as.integer(0)),
+                             logADD=log(added+1),
+                             logDEL=log(removed+1),
+                             logCOMPLEX=log(currComplex+1),
+                             logDUP=log(prevDupBlocks+1),
+                             y=REMOVED) %>%
+  select(file, author, team, ADD, DEL, CLOC, DUP, COMPLEX, COMPLEX_DELTA, NEWFILE, DELFILE, logADD, logDEL, logCOMPLEX, logDUP, INTROD, REMOVED, y)
+data <- data_scaled
+
+# adapt these to fit your machine and willingness to wait for results. Models are cached, you might need to remove the cache in order to rebuild if these values are changed.
+ITERATIONS <- 2000
+THREADS <- 2
+ADAPT_DELTA <- 0.95
+
+```
+
+```{r}
+summary(data)
+```
+
+We note that ADD, DEL, CLOC and COMPLEX have a range of about 0-35 units (stddevs).
+This means that they will have very large impact on predictions when fitting data into the model.
+
+Therefore, we create the log equivalent measures, which will make our predictions (residuals) a bit more sane.
+Large values in these metrics will have less of an impact on the prediction.
+Another way of thinking about this is that instead of the raw number (e.g. number of added lines), it is the _magnitude_ of the change that affects the _rate_ of added issues.
+
+As CLOC and COMPLEX are highly correlated, we use COMPLEX instead.
+
+Except for the many zeros, we have about 200 single removals of duplicates, and then the number drops off quickly.
+The maximum number of removed issues are 21, but most of them are well below 10.
+Many of the removals was due to deleted files.
+
+```{r}
+data %>% filter(y > 0) %>% ggplot(aes(x=y, color=DELFILE, fill=DELFILE)) + geom_histogram(binwidth = 1)
+```
+
+# Working Model
+
+* Terminology: $Weibull(\lambda, k)$, where $\lambda > 0$ is the *scale* parameter, and $k$ is the *shape* parameter
+* A Weibull distribution reduces to an exponential distribution when $k = 1$
+* A Weibull distribution is the same as a Generalized Gamma distribution with both its shape parameters $d$ and $p$ equal to $k$.
+
+The simplest possible model, only intercepts (on population, team and author level):
+
+```{r}
+M_intercepts_only <-
+  brm(data = data,
+      family = zero_inflated_negbinomial,
+      file = ".cache/removed/M_intercepts_only",
+      formula = bf(y ~ 0 + Intercept + (1 | team) + (1  | author),
+                   zi ~ 0 + Intercept ),
+      prior = c(prior(normal(0, 0.25), class = b),
+                prior(normal(0, 0.25), class = b, dpar=zi),
+                prior(weibull(2, 1), class = sd),
+                prior(gamma(0.01, 0.01), class = shape)),
+      warmup = 1000,
+      iter  = ITERATIONS,
+      chains = 4,
+      cores = 4,
+      backend="cmdstanr",
+      file_refit = "on_change",
+      threads = threading(THREADS),
+      save_pars = save_pars(all = TRUE),
+      adapt_delta = ADAPT_DELTA)
+
+```
+
+Note that we use the `0 + Intercept` notation, in order to explicitly set the priors on the intercepts.
+Otherwise brms sets its default prior there.
+It has a reasonable rhat value:
+
+```{r, eval=FALSE}
+rhat(M_intercepts_only)
+```
+```{r}
+stopifnot(rhat(M_intercepts_only) < 1.01)
+stopifnot(neff_ratio(M_intercepts_only) > 0.2)
+mcmc_trace(M_intercepts_only)
+```
+
+# Varying effect on team
+
+This model tries to model the group-level effect of logDEL on the teams group. But it fails the rhat test, because rhat of L_2[1,1] and L_2[1,2] is both NaN.
+
+```{r}
+M_logdel_zi_logdel_logdel_team <-
+  brm(data = data,
+      family = zero_inflated_negbinomial,
+      file = ".cache/removed/M_logdel_zi_logdel_logdel_team",
+      formula = bf(y ~ 1 + logDEL + (1 + logDEL | team) + (1 | author),
+                   zi ~ 1 + logDEL),
+      prior = c(prior(normal(0, 0.25), class = b),
+                prior(normal(0, 0.25), class = b, dpar=zi),
+                prior(lkj(2), class = cor),
+                prior(weibull(2, 1), class = sd),
+                prior(gamma(0.01, 0.01), class = shape)),
+      warmup = 1000,
+      iter  = ITERATIONS,
+      chains = 4,
+      cores = 4,
+      backend="cmdstanr",
+      file_refit = "on_change",
+      threads = threading(THREADS),
+      save_pars = save_pars(all = TRUE),
+      adapt_delta = ADAPT_DELTA)
+```
+
+```{r}
+rhat(M_logdel_zi_logdel_logdel_team)
+```
+
+Is there something in our data that prevents L_2 from being calculated?
+We do have authors that only have changed a single file in a single team. Can that affect the outcome?
+
+```{r}
+data |> group_by(team, author) |> tally() |> arrange(n) |> head(10)
+```
+
+What if we exclude those authors?
+
+```{r}
+
+reduced_data <- data |> filter(!(author %in% c(36, 58, 15, 23, 50, 62, 41, 3)))
+reduced_data |> group_by(team, author) |> tally() |> arrange(n) |> head(10)
+```
+
+Now all authors have at least four files they edit. Are there teams with only a single author?
+
+```{r}
+reduced_data |> group_by(team) |> select(author) |> distinct() |> tally() |> arrange(n)
+```
+
+Team 11 has a single author, and it was author 18, who changed 6 files according to the above. We exclude this author too.
+
+```{r}
+reduced_data |> filter(author == 18) |> select(team) |> distinct()
+```
+
+Author 18 only particupated in this only team - so this was a team that had only one single contributing member, and this member only was part of this team (according to this data).
+
+```{r}
+reduced_data <- data |> filter(!(author %in% c(36, 58, 15, 23, 50, 62, 41, 3, 18)))
+M_logdel_zi_logdel_logdel_team_reduced_data <-
+  brm(data = reduced_data,
+      family = zero_inflated_negbinomial,
+      file = ".cache/removed/M_logdel_zi_logdel_logdel_team_reduced_data",
+      formula = bf(y ~ 1 + logDEL + (1 + logDEL | team) + (1 | author),
+                   zi ~ 1 + logDEL),
+      prior = c(prior(normal(0, 0.25), class = b),
+                prior(normal(0, 0.25), class = b, dpar=zi),
+                prior(lkj(2), class = cor),
+                prior(weibull(2, 1), class = sd),
+                prior(gamma(0.01, 0.01), class = shape)),
+      warmup = 1000,
+      iter  = ITERATIONS,
+      chains = 4,
+      cores = 4,
+      backend="cmdstanr",
+      file_refit = "on_change",
+      threads = threading(THREADS),
+      save_pars = save_pars(all = TRUE),
+      adapt_delta = ADAPT_DELTA)
+```
+
+```{r}
+rhat(M_logdel_zi_logdel_logdel_team_reduced_data)
+```
+
+Still NaNs in the L_2 matrix.
+
+# Varying effect on both team and author
+
+```{r}
+M_logdel_zi_logdel_logdel_team_logdel_author_reduced_data <-
+  brm(data = reduced_data,
+      family = zero_inflated_negbinomial,
+      file = ".cache/removed/M_logdel_zi_logdel_logdel_team_logdel_author_reduced_data",
+      formula = bf(y ~ 1 + logDEL + (1 + logDEL | team) + (1 + logDEL | author),
+                   zi ~ 1 + logDEL),
+      prior = c(prior(normal(0, 0.25), class = b),
+                prior(normal(0, 0.25), class = b, dpar=zi),
+                prior(lkj(2), class = cor),
+                prior(weibull(2, 1), class = sd),
+                prior(gamma(0.01, 0.01), class = shape)),
+      warmup = 1000,
+      iter  = ITERATIONS,
+      chains = 4,
+      cores = 4,
+      backend="cmdstanr",
+      file_refit = "on_change",
+      threads = threading(THREADS),
+      save_pars = save_pars(all = TRUE),
+      adapt_delta = ADAPT_DELTA)
+```
+
+```{r}
+rhat(M_logdel_zi_logdel_logdel_team_logdel_author_reduced_data)
+```
+
+Still the same problem with L_2[1,1] and L_2[1,2] - How shall I interpret this matrix? 
+Do I need to specify the correlation between team and author variations also?
+
+```{r}
+get_prior(data=data, 
+          formula = bf(y ~ 1 + logDEL + (1 + logDEL | team) + (1 + logDEL | author), zi ~ 1 + logDEL),
+          family=zero_inflated_negbinomial)
+```
+
+
+# Boolean values among the predictors
+
+Imagine we have a boolean (logical) predictor in a formula. Like DELFILE in our dataset.
+
+```{r}
+M_delfile_logical <-
+  brm(data = data,
+      family = zero_inflated_negbinomial,
+      file = ".cache/removed/M_delfile_logical",
+      formula = bf(y ~ 1 + logDEL + DELFILE + (1 | team) + (1  | author),
+                   zi ~ 1 + logDEL + DELFILE),
+      prior = c(prior(normal(0, 0.25), class = b),
+                prior(normal(0, 0.25), class = b, dpar=zi),
+                prior(weibull(2, 1), class = sd),
+                prior(gamma(0.01, 0.01), class = shape)),
+      warmup = 1000,
+      iter  = ITERATIONS,
+      chains = 4,
+      cores = 4,
+      backend="cmdstanr",
+      file_refit = "on_change",
+      threads = threading(THREADS),
+      save_pars = save_pars(all = TRUE),
+      adapt_delta = ADAPT_DELTA)
+```
+
+We will get complaints from brms when we want to predict values using newdata, if we try to specify the value as a logical (either the constant F, or `as.logical(FALSE)` yields the same result):
+
+We get `New factor levels are not allowed. Levels allowed: 'FALSE', 'TRUE'. Levels found: '0'`
+
+```{r, eval=FALSE}
+newdata <- data.frame(t(c(file=17, author=24, team=6, logDEL=log(100), DELFILE=F, DUP=10/scale_dupblocks$stddev)))
+issues_predicted <- M_delfile_logical |> predicted_draws(newdata=newdata)
+```
+
+But, again - that is the frequentist way of thinking - only focusing on the beta for the "TRUE" value, and only estimating difference between the "FALSE" and the "TRUE".
+In a Bayesian way, we should handle it as a proper factor instead!
+
+```{r}
+data_factor <- data |> mutate(DELFILE_factor = as.factor(ifelse(DELFILE, 2, 1))) |> select(team, author, logDEL, DELFILE_factor, DUP, y)
+M_delfile_as_factor <-
+  brm(data = data_factor,
+      family = zero_inflated_negbinomial,
+      file = ".cache/removed/M_delfile_as_factor",
+      formula = bf(y ~ 1 + logDEL + DELFILE_factor + DUP + (1 | team) + (1  | author),
+                   zi ~ 1 + logDEL + DELFILE_factor + DUP),
+      prior = c(prior(normal(0, 0.25), class = b),
+                prior(normal(0, 0.25), class = b, dpar=zi),
+                prior(weibull(2, 1), class = sd),
+                prior(gamma(0.01, 0.01), class = shape)),
+      warmup = 1000,
+      iter  = ITERATIONS,
+      chains = 4,
+      cores = 4,
+      backend="cmdstanr",
+      file_refit = "on_change",
+      threads = threading(THREADS),
+      save_pars = save_pars(all = TRUE),
+      adapt_delta = ADAPT_DELTA)
+```
+
+```{r}
+M_delfile_as_factor
+```
+
+
+```{r}
+summary(data_factor)
+```
+
+Weird thing is, we still cannot handle FALSE as a value in the factor. We still have to code the factor as numeric values, in order to feed it through newdata. Raised issue at brms https://github.com/paul-buerkner/brms/issues/1442 --- but it could well be a tidybayes issue as well.
+
+```{r}
+
+newdata <- data.frame(t(c(file=17, author=24, team=6, logDEL=log(100), DELFILE_factor=1, DUP=10/scale_dupblocks$stddev)))
+issues_predicted <- M_delfile_as_factor |> predicted_draws(newdata=newdata)
+issues_predicted
+```
