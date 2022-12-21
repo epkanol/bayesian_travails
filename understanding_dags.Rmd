@@ -1,0 +1,151 @@
+---
+title: "Understanding DAGs"
+author: "Anders Sundelin"
+date: "2022-12-21"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dagitty)
+library(rethinking)
+```
+
+# Getting down to DAGs
+
+Initial DAG:
+
+```{r }
+introd.dag <- dagitty("dag {
+                      AUTHOR -> INTROD;
+                      REPO -> INTROD;
+                      TEAM -> INTROD;
+                      REASON -> INTROD;
+                      ADDED -> INTROD;
+                      ISSUES -> INTROD;
+                      COMPLEX -> INTROD;
+                      FILE -> ISSUES;
+                      FILE -> REPO;
+                      FILE -> COMPLEX;
+                      AUTHOR -> TEAM;
+                      AUTHOR -> REPO;
+                      TEAM -> REPO;
+                      }")
+coordinates(introd.dag) <- list(x=c(COMPLEX=0, FILE=1, ISSUES=1, ADDED=-1, INTROD=1, REPO=2, REASON=-1, AUTHOR=0, TEAM=2),
+                                y=c(COMPLEX=0, FILE=0, ISSUES=1, ADDED=1 , INTROD=2, REPO=2, REASON=3 , AUTHOR=3, TEAM=3))
+
+drawdag(introd.dag)
+```
+
+Explanation of the variables in the DAG:
+
+* INTROD - this is the thing we are trying to model/predict. It is the number of *introduced duplicates* in a particular file, in a particular change (commit). Zero or larger (absolute upper bound is the number of lines in the file - due to the way Sonar calculates duplicates)
+* ADDED  - Number of added lines in the particular file, in the particular commit, as measured via Git (--numstat)
+* REASON - The reason for changing the file - factor levels include "Added functionality", "TR fix", "Refactoring/spontaneous improvement".
+* AUTHOR - The author that started the change (Git Author).
+* TEAM   - The team that the author was part of, at the time of the commit first being created.
+* REPO   - The repository holding the files. Authors and teams are more or less familiar with individual repositories (depending on whether they have worked there before).
+* ISSUES - The number of existing duplicates, in the file, as measured by Sonar, before the commit is applied.
+* FILE   - The changed file. Files always belong to a repo. So, given that I know what file it is, I know what repo is affected. But a repo has (most likely) many files.
+* COMPLEX - The McCabe complexity of the file (as calculated by Sonar), before the change was made.
+
+Causal reasoning:
+
+* By modifying code, authors make changes to existing files, create new files, or delete existing files.
+* Authors belong to a team, interact with team members (reviews, merges, discusses changes).
+* Both authors and teams have various levels of understanding of code repositories.
+* Repositories serve as the grouping level of files. Each file belong to one, and only one, repository, and if I know what file is affected, I also know what repository was affected. But the converse is not true.
+* Individual files have individual number of existing issues (duplicates), and existing McCabe complexity. Both values start at 0, and are bounded by the number of lines in the file (at least same magnitude).
+
+The purpose of the model is to ascertain how the model can be used to illustrate and predict "team behaviour", in particular in an ownership context.
+Teams that "care for" their repo are likely to introduce less duplicates than other, less caring (or more junior) teams.
+
+
+Questions:
+
+* We could label the arrow between AUTHOR and REPO with "familiarity". How do we reason about the direction of the arrow? Should the causal effect flow "from AUTHOR, via REPO, to INTROD", or is it "from REPO, via AUTHOR, to INTROD"? 
+* Similar discussion for TEAM.
+* This is of course super important, as it determines whether REPO is a collider or not.
+* We could put ADDED and REASON inside a grouping level called COMMIT, as they are effectively tied together there. But it is unclear what that would give us - we are not comparing commits per se.
+
+
+
+```{r}
+adjustmentSets(introd.dag, exposure = c("TEAM", "ADDED", "COMPLEX", "ISSUES", "REASON"), outcome = "INTROD")
+```
+
+So, if I were to include TEAM, ADDED, COMPLEX, ISSUES and REASON in my causal model, I also need to include both AUTHOR and FILE. But not REPO (due to the collider bias).
+
+
+If I also include "REPO":
+
+```{r}
+adjustmentSets(introd.dag, exposure = c("TEAM", "ADDED", "COMPLEX", "ISSUES", "REASON", "REPO"), outcome = "INTROD")
+```
+
+So, if I include REPO in my predictors, then I should include AUTHOR, but not FILE.
+
+
+```{r}
+impliedConditionalIndependencies(introd.dag)
+```
+
+
+# Modified DAG
+
+If we instead reason that AUTHORs only introduces duplicates via FILEs, and not directly influences INTROD, then our DAG becomes:
+
+```{r}
+introd.dag.2 <- dagitty("dag {
+                      AUTHOR -> FILE;
+                      REPO -> INTROD;
+                      TEAM -> INTROD;
+                      REASON -> INTROD;
+                      ADDED -> INTROD;
+                      ISSUES -> INTROD;
+                      COMPLEX -> INTROD;
+                      FILE -> ISSUES;
+                      FILE -> REPO;
+                      FILE -> COMPLEX;
+                      AUTHOR -> TEAM;
+                      TEAM -> REPO;
+                      }")
+coordinates(introd.dag.2) <- list(x=c(COMPLEX=0, FILE=1, ISSUES=1, ADDED=-1, INTROD=1, REPO=2, REASON=-1, AUTHOR=2, TEAM=2),
+                                y=c(COMPLEX=0, FILE=0, ISSUES=1, ADDED=1 , INTROD=2, REPO=3, REASON=3 , AUTHOR=0, TEAM=2))
+
+drawdag(introd.dag.2)
+
+```
+
+
+
+```{r}
+adjustmentSets(introd.dag.2, exposure = c("TEAM", "COMPLEX", "ISSUES", "ADDED", "REASON"), outcome = "INTROD")
+```
+
+This would indicate that if I want to predict INTROD based on the TEAM, COMPLEX, ISSUES, ADDED and REASON variables, I also need to include FILE in my model. But not REPO or AUTHOR.
+
+
+```{r}
+adjustmentSets(introd.dag.2, exposure = c("TEAM", "COMPLEX", "ISSUES", "ADDED", "REASON", "REPO"), outcome = "INTROD")
+```
+
+No further parameters should be added if my linear regression includes TEAM, COMPLEX, ISSUES, ADDED, REASON and REPO.
+
+
+```{r}
+adjustmentSets(introd.dag.2, exposure = c("AUTHOR", "COMPLEX", "ISSUES", "ADDED", "REASON"), outcome = "INTROD")
+```
+
+There does not seem to be any adjustmentSets for these parameters. Using FILE instead of ISSUES or COMPLEX will solve the problem, returning an empty set again.
+
+
+```{r}
+impliedConditionalIndependencies(introd.dag.2)
+```
+
+
+# Questions
+
+* What is the scientific way of reasoning and choosing between these models? Depending on which model I believe in, more or less variables should be added to the linear regression model.
+* My first attempt was to model AUTHORs as interacting directly with INTROD. But in reality, all their interactions are through FILEs. Does that mean that the causal arrow has to go through FILE?
