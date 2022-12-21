@@ -251,7 +251,12 @@ get_prior(data=data,
           formula = bf(y ~ 1 + logDEL + (1 + logDEL | team) + (1 + logDEL | author), zi ~ 1 + logDEL),
           family=zero_inflated_negbinomial)
 ```
+## Update on NaNs in L_2 matrix
 
+Rereading Rethinking, it seems fair to assume that L_2 refers to a Cholesky decomposition of an $R = LL^T$ correlation matrix. Having NaNs there does not seem to be a problem, at least for `bayesplot`, who simply drops the NaNs before plotting $\hat{R}$.
+Also, there are indications that Cholesky decompositions seems to be prone to having NaNs, due to decaying eigenvalues: https://stackoverflow.com/questions/46499174/cholesky-decomposition-generating-nans-in-java
+
+The bottom line is that it was not my dataset that generated the NaNs, and the `bayesplot` package simply drops NaNs before plotting --- so it seems I'm in good company if I do the same...
 
 # Boolean values among the predictors
 
@@ -279,12 +284,17 @@ M_delfile_logical <-
       adapt_delta = ADAPT_DELTA)
 ```
 
-We will get complaints from brms when we want to predict values using newdata, if we try to specify the value as a logical (either the constant F, or `as.logical(FALSE)` yields the same result):
+The transpose operator in R, `t()` has a side effect of coercing all values to the same type.
+Thus, if we use the syntax `newdata <- data.frame(t(c(file=17, author=24, team=6, logDEL=log(100), DELFILE=F, DUP=10/scale_dupblocks$stddev)))`,
+the resulting data frame will have all numeric columns (other types are lost).
 
+This will result in complaints from brms when we want to predict values using newdata, if we try to specify the value as a logical (either the constant F, or `as.logical(FALSE)` yields the same result):
 We get `New factor levels are not allowed. Levels allowed: 'FALSE', 'TRUE'. Levels found: '0'`
 
-```{r, eval=FALSE}
-newdata <- data.frame(t(c(file=17, author=24, team=6, logDEL=log(100), DELFILE=F, DUP=10/scale_dupblocks$stddev)))
+Bottom line - be wary of R, and in particular transpose operators (or other matrix operations). Create proper data frames instead, where each column has individual types!
+
+```{r}
+newdata <- data.frame(file=17, author=24, team=6, logDEL=log(100), DELFILE=F, DUP=10/scale_dupblocks$stddev)
 issues_predicted <- M_delfile_logical |> predicted_draws(newdata=newdata)
 ```
 
@@ -292,7 +302,7 @@ But, again - that is the frequentist way of thinking - only focusing on the beta
 In a Bayesian way, we should handle it as a proper factor instead!
 
 ```{r}
-data_factor <- data |> mutate(DELFILE_factor = as.factor(ifelse(DELFILE, 2, 1))) |> select(team, author, logDEL, DELFILE_factor, DUP, y)
+data_factor <- data |> mutate(DELFILE_factor = as.factor(ifelse(DELFILE, 'a', 'b'))) |> select(team, author, logDEL, DELFILE_factor, DUP, y)
 M_delfile_as_factor <-
   brm(data = data_factor,
       family = zero_inflated_negbinomial,
@@ -327,7 +337,7 @@ Weird thing is, we still cannot handle FALSE as a value in the factor. We still 
 
 ```{r}
 
-newdata <- data.frame(t(c(file=17, author=24, team=6, logDEL=log(100), DELFILE_factor=1, DUP=10/scale_dupblocks$stddev)))
+newdata <- data.frame(file=17, author=24, team=6, logDEL=log(100), DELFILE_factor='a', DUP=10/scale_dupblocks$stddev)
 issues_predicted <- M_delfile_as_factor |> predicted_draws(newdata=newdata)
 issues_predicted
 ```
