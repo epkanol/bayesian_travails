@@ -17,68 +17,144 @@ library(bayesplot)
 
 ## Data Ingestion and Model Building
 
-Models are cached in subdirectory, but they will take a few minutes each to complete the first time. 
+Models are cached in subdirectory, as they take considerable time to run. Expect multiple hours for the complete, multi-level model with all the data set.
 You might need to remove the cached models when changing some parameters (though formula or data changes are usually detected by brms).
+
+We move away from zero-based scaling, instead opting for scaling the logarithm of the severely right-skewed values (added, removed, complexity, duplicated lines).
+We are also heeding the advice of Gelman: https://statmodeling.stat.columbia.edu/2019/08/21/you-should-usually-log-transform-your-positive-data/
+This also means that the linear model will be based on the _magnitude_ of the change in parameter (e.g. 0, 1, 2.7, 7.3, 19.8 added lines/existing complexity). So each individual line will have marginally lower impact, but the scale of the parameter will still matter.
+
+A simple scientific model, where rates of change is taken from the population only, and the intercept varies per group becomes:
+
+$log(\lambda) = \beta_{0,i} + \beta_A A_i + \beta_C C_i + \beta_D D_i$
+
+where 
+
+$A_i = \frac{ln(added_i+1) - \hat{\mu_{\alpha}}}{\hat{\sigma_{\alpha}}}$
+
+and 
+$\hat{\mu_{\alpha}} = mean(ln(added+1))$
+$\hat{\sigma_{\alpha}} = stddev(ln(added+1))$
+
+$C_i = \frac{ln(complexity_i+1) - \hat{\mu_{\gamma}}}{\hat{\sigma_{\gamma}}}$
+
+and 
+$\hat{\mu_{\gamma}} = mean(ln(complexity+1))$
+$\hat{\sigma_{\gamma}} = stddev(ln(complexity+1))$
+
+and
+
+$D_i = \frac{ln(dupblocks_i+1) - \hat{\mu_{\delta}}}{\hat{\sigma_{\delta}}}$
+
+and 
+$\hat{\mu_{\delta}} = mean(ln(dupblocks+1))$
+$\hat{\sigma_{\delta}} = stddev(ln(dupblocks+1))$
+
+This corresponds to the following multiplicative model for $\lambda$ (also called $\mu$ in the negative binomial context):
+
+$\lambda_i = e^{\beta_{0,i}} (\frac{added_i+1}{e^\hat{\mu_\alpha}})^{\frac{\beta_A}{\hat{\sigma_\alpha}}} (\frac{complexity_i+1}{e^\hat{\mu_\gamma}})^{\frac{\beta_C}{\hat{\sigma_\gamma}}} (\frac{duplicates_i+1}{e^\hat{\mu_\delta}})^{\frac{\beta_D}{\hat{\sigma_\delta}}}$
+
+In this equation, $added$, $complexity$ and $duplicates$ are on their natural scale, starting at 0 and counting upwards.
+
+Depending on which parameters we include in the group-level effect, the exponent will change accordingly (hence the $i$ in $\beta_{0,i}$ for the model where only the intercept changes per team and repo).
+The other parameters, $\hat{\mu_\alpha}$ and $\hat{\sigma_\alpha}$, et al. are just normalizing constants, defined as the mean and standard deviation of the logarithm of the corresponding metric count.
 
 ```{r ingest}
 df <- read.csv("samples/authors-team-impact.csv")
 
-scale_cloc      <- data.frame(t(c(count=1771, mean=123.6285, stddev=303.9526, median=56)))
-scale_mccabe    <- data.frame(t(c(count=1771, mean=13.70073, stddev=40.93051, median=5)))
-scale_duplines  <- data.frame(t(c(count=1771, mean=18.04743, stddev=59.00211, median=0)))
-scale_dupblocks <- data.frame(t(c(count=1771, mean=0.9994353, stddev=3.071005, median=0)))
-scale_added <- df %>% summarize(count=n(), mean=mean(added), stddev=sd(added), median=median(added))
-scale_removed <- df %>% summarize(count=n(), mean=mean(removed), stddev=sd(removed), median=median(removed))
-
-data_scaled <- df %>% mutate(file=as.factor(fileid),
-                             author=as.factor(authorid),
-                             team=as.factor(authorteamid),
+data_logscaled <- df %>% mutate(repo=as.factor(repo),
+                             file=as.factor(file),
                              ISTEST=istestfile,
-                             ADD=(added)/scale_added$stddev,
-                             DEL=(removed)/scale_removed$stddev,
-                             CLOC=(currCloc)/scale_cloc$stddev,
-                             COMPLEX=(currComplex)/scale_mccabe$stddev,
-                             COMPLEX_DELTA=(currComplex - prevComplex)/scale_mccabe$stddev,
-                             NEWFILE=if_else(prevCloc == 0, TRUE, FALSE),
-                             DELFILE=if_else(currCloc == 0, TRUE, FALSE),
-                             DUP=(prevDupBlocks)/scale_dupblocks$stddev,
+                             ISNEW=isnewfile,
+                             author=as.factor(author),
+                             authorteam=as.factor(authorteam),
+                             committer=as.factor(committer),
+                             committerteam=as.factor(committerteam),
+                             ADD=added,
+                             DEL=removed,
+                             REASON=as.factor(changereason),
+                             CLOC=currCloc,
+                             COMPLEX=currComplex,
+                             DUP=prevDupBlocks, # duplicates prior to the change
                              INTROD=if_else(delta >= 0, delta, as.integer(0)),
                              REMOVED=if_else(delta <= 0, abs(delta), as.integer(0)),
                              logADD=log(added+1),
                              logDEL=log(removed+1),
                              logCOMPLEX=log(currComplex+1),
-                             logDUP=log(prevDupBlocks+1),
-                             y=REMOVED) %>%
-  select(file, author, team, ADD, DEL, CLOC, DUP, COMPLEX, COMPLEX_DELTA, NEWFILE, DELFILE, logADD, logDEL, logCOMPLEX, logDUP, INTROD, REMOVED, y)
-data <- data_scaled
+                             logDUP=log(prevDupBlocks+1)) %>%
+  select(repo, file, ISTEST, ISNEW, author, authorteam, committer, committerteam, ADD, DEL, REASON, CLOC, COMPLEX, DUP, logADD, logDEL, logCOMPLEX, logDUP, INTROD, REMOVED)
+
+data <- data_logscaled |> mutate(A = scale(logADD)[,1],
+                             R = scale(logDEL)[,1],
+                             C = scale(logCOMPLEX)[,1],
+                             D = scale(logDUP)[,1])
 
 # adapt these to fit your machine and willingness to wait for results. Models are cached, you might need to remove the cache in order to rebuild if these values are changed.
-ITERATIONS <- 2000
-THREADS <- 2
+CHAINS <- 4
+CORES <- 2
+ITERATIONS <- 4000
+THREADS <- 4
 ADAPT_DELTA <- 0.95
 
 ```
 
+# Exploratory Data Analysis
+
+Introduced duplicates in files, per repo.
 ```{r}
-summary(data)
+data |> filter(INTROD > 0) |> group_by(repo, INTROD) |> tally()
 ```
 
-We note that ADD, DEL, CLOC and COMPLEX have a range of about 0-35 units (stddevs).
-This means that they will have very large impact on predictions when fitting data into the model.
-
-Therefore, we create the log equivalent measures, which will make our predictions (residuals) a bit more sane.
-Large values in these metrics will have less of an impact on the prediction.
-Another way of thinking about this is that instead of the raw number (e.g. number of added lines), it is the _magnitude_ of the change that affects the _rate_ of added issues.
-
-As CLOC and COMPLEX are highly correlated, we use COMPLEX instead.
-
-Except for the many zeros, we have about 200 single removals of duplicates, and then the number drops off quickly.
-The maximum number of removed issues are 21, but most of them are well below 10.
-Many of the removals was due to deleted files.
+Most of the introduced duplicates are small (single-digits), but some are large, ranging into the hundreds.
 
 ```{r}
-data %>% filter(y > 0) %>% ggplot(aes(x=y, color=DELFILE, fill=DELFILE)) + geom_histogram(binwidth = 1)
+changesPerRepoAndTeam <- data |> group_by(repo, authorteam) |> tally()
+zerosPerRepoAndTeam <- data |> filter(INTROD == 0) |> group_by(repo, authorteam) |> summarise(zeros=n())
+merge(changesPerRepoAndTeam, zerosPerRepoAndTeam) |> mutate(zeroIntrodRatio = zeros/n) |> arrange(zeroIntrodRatio) |> ggplot(aes(x=authorteam, y=zeroIntrodRatio, color=repo, size=n)) + geom_point() + ggtitle("Proportion of zero introduced duplicates, per repo and team")
 ```
+
+Teams have a different proportion of zero introduced duplicates. There seems to be some pattern here for us to investigate.
+
+
+```{r}
+sum_per_team <- data |> group_by(authorteam) |> summarize(filechanges = n())
+data_with_sum_per_team <- merge(data, sum_per_team)
+data_with_sum_per_team |> filter(repo == "Jupiter", INTROD > 0) |> group_by(authorteam) |> ggplot(aes(x=authorteam, y=INTROD, group=authorteam, color=filechanges)) + geom_boxplot() + ggtitle("Introduced issues per authorteam in repo Jupiter")
+```
+```{r}
+data |> filter(repo == "Jupiter", INTROD > 0, authorteam %in% c("Red","Blue")) |> group_by(authorteam) |> ggplot(aes(x=INTROD, color=authorteam, fill=authorteam)) + geom_histogram(position = "dodge", binwidth = 1) + ggtitle("Number of introduced duplicates per file in team Jupiter, by team Red and Blue")
+```
+
+In the Jupiter repository, there are differences in the number of introduced issues between the Red and Blue teams.
+
+```{r}
+data_with_sum_per_team |> filter(repo == "Neptune", INTROD > 0) |> group_by(authorteam) |> ggplot(aes(x=authorteam, y=INTROD, group=authorteam, color=filechanges)) + geom_boxplot() + ggtitle("Introduced issues per authorteam in repo Neptune")
+```
+
+Likewise in the Neptune repository.
+
+```{r}
+data |> filter(repo == "Neptune", INTROD > 0, authorteam %in% c("Green","Blue")) |> group_by(authorteam) |> ggplot(aes(x=INTROD, color=authorteam, fill=authorteam)) + geom_histogram(position = "dodge", binwidth = 1)
+```
+
+Green and Blue teams seem to behave similarly in the Neptune repository. The other teams are not as active there.
+
+```{r}
+data_with_sum_per_team |> filter(repo == "IntTest", INTROD > 0) |> group_by(authorteam) |> ggplot(aes(x=authorteam, y=INTROD, group=authorteam, color=filechanges)) + geom_boxplot() + ggtitle("Introduced issues per authorteam in repo IntTest")
+```
+```{r}
+data |> filter(repo == "IntTest", INTROD > 0, authorteam == "Green") |> group_by(authorteam) |> ggplot(aes(x=INTROD, color=authorteam, fill=authorteam)) + geom_histogram(position = "dodge")
+
+data |> filter(repo == "IntTest", INTROD > 0, authorteam %in% c("Arch", "Orange", "Violet", "Green")) |> group_by(authorteam) |> ggplot(aes(x=INTROD, color=authorteam, fill=authorteam)) + geom_histogram(position = "dodge", binwidth = 1)
+```
+
+The Arch team introduced very few duplicatesin the IntTest repository. The other teams introduced more, especially the Green team.
+
+```{r}
+data |> filter(repo == "IntTest", INTROD > 0, authorteam %in% c("Pink", "Arch", "UI")) |> group_by(authorteam) |> ggplot(aes(x=INTROD, color=authorteam, fill=authorteam)) + geom_histogram(position = "dodge", binwidth = 1) + ggtitle("Small contributors to IntTest repo, vs. Arch team")
+```
+
+Some teams introduved very few duplicates --- but the UI team still introduved three files with between 15 and 31 duplicates. The Arch team introduced three files with 1, 2 and 4 duplicates, respectively.
 
 # Working Model
 
@@ -86,64 +162,235 @@ data %>% filter(y > 0) %>% ggplot(aes(x=y, color=DELFILE, fill=DELFILE)) + geom_
 * A Weibull distribution reduces to an exponential distribution when $k = 1$
 * A Weibull distribution is the same as a Generalized Gamma distribution with both its shape parameters $d$ and $p$ equal to $k$.
 
-The simplest possible model, only intercepts (on population, team and author level):
+The simplest possible model, only intercepts (on population, committerteam and repo level):
+
+```{r}
+d <- data |> select(y=INTROD,
+                    team=committerteam,
+                    repo=repo)
+formula <- bf(y ~ 1 + (1 | team/repo),
+              zi ~ 1 )
+
+get_prior(data=d,
+          family=zero_inflated_negbinomial,
+          formula=formula)
+```
+
+```{r}
+priors <- c(prior(normal(0, 0.5), class = Intercept),
+            prior(weibull(2, 1), class = sd),
+            prior(normal(0, 0.5), class = Intercept, dpar=zi),
+            prior(gamma(1, 0.1), class = shape))
+validate_prior(prior=priors,
+               formula=formula,
+               data=d,
+               family=zero_inflated_negbinomial)
+```
+
 
 ```{r}
 M_intercepts_only <-
-  brm(data = data,
+  brm(data = d,
       family = zero_inflated_negbinomial,
-      file = ".cache/removed/M_intercepts_only",
-      formula = bf(y ~ 0 + Intercept + (1 | team) + (1  | author),
-                   zi ~ 0 + Intercept ),
-      prior = c(prior(normal(0, 0.25), class = b),
-                prior(normal(0, 0.25), class = b, dpar=zi),
-                prior(weibull(2, 1), class = sd),
-                prior(gamma(0.01, 0.01), class = shape)),
+      file = ".cache/added/M_intercepts_only",
+      formula = formula,
+      prior = priors,
       warmup = 1000,
       iter  = ITERATIONS,
-      chains = 4,
-      cores = 4,
+      chains = CHAINS,
+      cores = CORES,
       backend="cmdstanr",
       file_refit = "on_change",
       threads = threading(THREADS),
       save_pars = save_pars(all = TRUE),
       adapt_delta = ADAPT_DELTA)
-
 ```
+Expected runtime: ~3600 seconds
 
-Note that we use the `0 + Intercept` notation, in order to explicitly set the priors on the intercepts.
+If we were to use the `0 + Intercept` notation, we would not center the population-level parameters around 0. This represents the expected response value when all predictors are at their means. 
+
 Otherwise brms sets its default prior there.
-It has a reasonable rhat value:
+
+The model has a reasonable rhat value and neff ratios:
 
 ```{r, eval=FALSE}
 rhat(M_intercepts_only)
+min(neff_ratio(M_intercepts_only))
 ```
 ```{r}
-stopifnot(rhat(M_intercepts_only) < 1.01)
-stopifnot(neff_ratio(M_intercepts_only) > 0.2)
-mcmc_trace(M_intercepts_only)
+M_intercepts_only <- add_criterion(M_intercepts_only, criterion = "loo")
 ```
 
-# Varying effect on team
+```{r}
+m <- M_intercepts_only
+stopifnot(rhat(m) < 1.01)
+stopifnot(neff_ratio(m) > 0.2)
+mcmc_trace(m)
+```
+```{r}
+rhat(m) |> mcmc_rhat()
+neff_ratio(m) |> mcmc_neff()
+```
 
-This model tries to model the group-level effect of logDEL on the teams group. But it fails the rhat test, because rhat of L_2[1,1] and L_2[1,2] is both NaN.
+Both Rhat and Neff ratio looks good.
 
 ```{r}
-M_logdel_zi_logdel_logdel_team <-
-  brm(data = data,
+loo <- loo(m)
+loo
+plot(loo)
+```
+
+We have 7 observations with high Pareto k values. Most likely due to sparse data for some observations.
+
+We can do a more exact Pareto calculation by refitting the model 7 times, each time excluding one of the problematic observations.
+If these calculations produce reasonable Pareto values (< 0.7), then we can still trust the results.
+
+```{r, eval=FALSE}
+reloo <- reloo(m, loo, chains=CHAINS)
+```
+Doing the reloo takes about 7 hours, so it is best done manually (e.g over night).
+
+If reloo sorted out the problematic observations, we can still trust the results (the model has converged).
+
+```{r}
+summary(m)
+```
+
+```{r}
+ranef(m)
+```
+
+```{r}
+mcmc_areas(m, regex_pars = c("^b_", "^b_zi", "^sd_"))
+```
+
+```{r}
+mcmc_areas(m, regex_pars = c("^r_committerteam[[]"))
+
+```
+
+```{r}
+teams <- c("Arch", "Blue", "Brown", "Green", "Orange", "Pink", "Red", "UI", "Unknown", "Violet", "Yellow")
+lapply(teams, function(t) mcmc_areas(m, regex_pars = c(paste0("^r_committerteam:repo[[]", t))))
+```
+
+```{r}
+repos <- c("IntTest", "Jupiter", "Saturn", "Uranus", "Neptune", "Venus", "Mars", "Mercury")
+lapply(repos, function(t) mcmc_areas(m, regex_pars = c(paste0("^r_committerteam:repo[[].*_", t,",Intercept[]]"))))
+
+```
+
+Clearly there are some differences between teams.
+
+## Posterior Predictive Checks
+
+```{r}
+yrep <- posterior_predict(m)
+```
+
+Proportion of zeros
+
+```{r}
+ppc_stat(y = d$y, yrep, stat = function(y) mean(y == 0))
+```
+
+The zero-inflation seems to be working very well.
+
+The observed max value ranges falls well within the predicted max value for the individual observations. There are no extreme max values either, indicating that the model converged appropriately (the data/likelihood tamed the priors).
+
+```{r}
+ppc_stat(y = d$y, yrep, stat = "max")
+```
+
+Rootogram, full scale
+
+```{r}
+rootogram <- pp_check(m, type = "rootogram", style="suspended")
+```
+
+Rootogram, sized according to reasonable (observed) values.
+
+```{r}
+rootogram + scale_y_continuous(limits=c(0, 35))  + scale_x_continuous(limits=c(0,150))
+```
+
+The suspended rootogram shows that our model seems to somewhat overestimate the introduces issues (all light blue buckets protude upwards from the x-axis).
+
+## Conditional effects
+
+
+```{r}
+source("conditional_effects.R")
+```
+
+```{r}
+ftotArch <- condeffect_logCOMPLEX_by_logADD(m, d, "Arch", "IntTest")
+ftotGreen <- condeffect_logCOMPLEX_by_logADD(m, d, "Green", "IntTest")
+```
+
+In the conditional effects graphs (measuring the expected value, for a given set of values), the x-axis show one variable (A, C or D), and the coloured lines show the expected outcome (y), for various values of one other value. The plots below show how complexity (C) interacts with number of added lines (A) for two teams with different behaviour in the IntTest repository.
+
+```{r}
+plot_logCOMPLEX_by_logADD(m, d, ftotArch, "Arch", "IntTest")
+```
+
+```{r}
+plot_logCOMPLEX_by_logADD(m, d, ftotGreen, "Green", "IntTest")
+```
+
+Because of our simple model, all teams and repos share the same slope, only the intercepts differ.
+
+We can do better, given more compute power.
+
+# Incorporating A, C and D into our model
+
+Following our DAG, we could include A, R, C, D and possibly Reason (depending on whether we want to test if it impacts the number of added or removed lines) in our model. 
+However, we have to have a model that converges reasonably well as well.
+
+We start with A, C and D.
+```{r}
+d <- data |> select(y=INTROD,
+                    A=A,
+                    C=C,
+                    D=D,
+                    team=committerteam,
+                    repo=repo)
+formula <- bf(y ~ 1 + A + C + D + (1 + A + C + D | team/repo),
+              zi ~ 1 + A )
+
+get_prior(data=d,
+          family=zero_inflated_negbinomial,
+          formula=formula)
+```
+
+```{r}
+priors <- c(prior(normal(0, 0.5), class = Intercept),
+            prior(normal(0, 0.25), class = b),
+            prior(weibull(2, 1), class = sd),
+            prior(lkj(2), class = cor),
+            prior(normal(0, 0.5), class = Intercept, dpar=zi),
+            prior(normal(0.5, 0.5), class = b, dpar=zi),
+            prior(gamma(1, 0.1), class = shape))
+validate_prior(prior=priors,
+               formula=formula,
+               data=d,
+               family=zero_inflated_negbinomial)
+
+```
+
+Full model takes about 15000 seconds to complete on my i9 laptop.
+
+```{r}
+M_full_model <-
+  brm(data = d,
       family = zero_inflated_negbinomial,
-      file = ".cache/removed/M_logdel_zi_logdel_logdel_team",
-      formula = bf(y ~ 1 + logDEL + (1 + logDEL | team) + (1 | author),
-                   zi ~ 1 + logDEL),
-      prior = c(prior(normal(0, 0.25), class = b),
-                prior(normal(0, 0.25), class = b, dpar=zi),
-                prior(lkj(2), class = cor),
-                prior(weibull(2, 1), class = sd),
-                prior(gamma(0.01, 0.01), class = shape)),
+      file = ".cache/added/M_full_model",
+      formula = formula,
+      prior = priors,
       warmup = 1000,
       iter  = ITERATIONS,
-      chains = 4,
-      cores = 4,
+      chains = CHAINS,
+      cores = CORES,
       backend="cmdstanr",
       file_refit = "on_change",
       threads = threading(THREADS),
@@ -152,192 +399,217 @@ M_logdel_zi_logdel_logdel_team <-
 ```
 
 ```{r}
-rhat(M_logdel_zi_logdel_logdel_team)
-```
-
-Is there something in our data that prevents L_2 from being calculated?
-We do have authors that only have changed a single file in a single team. Can that affect the outcome?
-
-```{r}
-data |> group_by(team, author) |> tally() |> arrange(n) |> head(10)
-```
-
-What if we exclude those authors?
-
-```{r}
-
-reduced_data <- data |> filter(!(author %in% c(36, 58, 15, 23, 50, 62, 41, 3)))
-reduced_data |> group_by(team, author) |> tally() |> arrange(n) |> head(10)
-```
-
-Now all authors have at least four files they edit. Are there teams with only a single author?
-
-```{r}
-reduced_data |> group_by(team) |> select(author) |> distinct() |> tally() |> arrange(n)
-```
-
-Team 11 has a single author, and it was author 18, who changed 6 files according to the above. We exclude this author too.
-
-```{r}
-reduced_data |> filter(author == 18) |> select(team) |> distinct()
-```
-
-Author 18 only particupated in this only team - so this was a team that had only one single contributing member, and this member only was part of this team (according to this data).
-
-```{r}
-reduced_data <- data |> filter(!(author %in% c(36, 58, 15, 23, 50, 62, 41, 3, 18)))
-M_logdel_zi_logdel_logdel_team_reduced_data <-
-  brm(data = reduced_data,
-      family = zero_inflated_negbinomial,
-      file = ".cache/removed/M_logdel_zi_logdel_logdel_team_reduced_data",
-      formula = bf(y ~ 1 + logDEL + (1 + logDEL | team) + (1 | author),
-                   zi ~ 1 + logDEL),
-      prior = c(prior(normal(0, 0.25), class = b),
-                prior(normal(0, 0.25), class = b, dpar=zi),
-                prior(lkj(2), class = cor),
-                prior(weibull(2, 1), class = sd),
-                prior(gamma(0.01, 0.01), class = shape)),
-      warmup = 1000,
-      iter  = ITERATIONS,
-      chains = 4,
-      cores = 4,
-      backend="cmdstanr",
-      file_refit = "on_change",
-      threads = threading(THREADS),
-      save_pars = save_pars(all = TRUE),
-      adapt_delta = ADAPT_DELTA)
-```
-
-```{r}
-rhat(M_logdel_zi_logdel_logdel_team_reduced_data)
-```
-
-Still NaNs in the L_2 matrix.
-
-# Varying effect on both team and author
-
-```{r}
-M_logdel_zi_logdel_logdel_team_logdel_author_reduced_data <-
-  brm(data = reduced_data,
-      family = zero_inflated_negbinomial,
-      file = ".cache/removed/M_logdel_zi_logdel_logdel_team_logdel_author_reduced_data",
-      formula = bf(y ~ 1 + logDEL + (1 + logDEL | team) + (1 + logDEL | author),
-                   zi ~ 1 + logDEL),
-      prior = c(prior(normal(0, 0.25), class = b),
-                prior(normal(0, 0.25), class = b, dpar=zi),
-                prior(lkj(2), class = cor),
-                prior(weibull(2, 1), class = sd),
-                prior(gamma(0.01, 0.01), class = shape)),
-      warmup = 1000,
-      iter  = ITERATIONS,
-      chains = 4,
-      cores = 4,
-      backend="cmdstanr",
-      file_refit = "on_change",
-      threads = threading(THREADS),
-      save_pars = save_pars(all = TRUE),
-      adapt_delta = ADAPT_DELTA)
-```
-
-```{r}
-rhat(M_logdel_zi_logdel_logdel_team_logdel_author_reduced_data)
-```
-
-Still the same problem with L_2[1,1] and L_2[1,2] - How shall I interpret this matrix? 
-Do I need to specify the correlation between team and author variations also?
-
-```{r}
-get_prior(data=data, 
-          formula = bf(y ~ 1 + logDEL + (1 + logDEL | team) + (1 + logDEL | author), zi ~ 1 + logDEL),
-          family=zero_inflated_negbinomial)
-```
-## Update on NaNs in L_2 matrix
-
-Rereading Rethinking, it seems fair to assume that L_2 refers to a Cholesky decomposition of an $R = LL^T$ correlation matrix. Having NaNs there does not seem to be a problem, at least for `bayesplot`, who simply drops the NaNs before plotting $\hat{R}$.
-Also, there are indications that Cholesky decompositions seems to be prone to having NaNs, due to decaying eigenvalues: https://stackoverflow.com/questions/46499174/cholesky-decomposition-generating-nans-in-java
-
-The bottom line is that it was not my dataset that generated the NaNs, and the `bayesplot` package simply drops NaNs before plotting --- so it seems I'm in good company if I do the same...
-
-# Boolean values among the predictors
-
-Imagine we have a boolean (logical) predictor in a formula. Like DELFILE in our dataset.
-
-```{r}
-M_delfile_logical <-
-  brm(data = data,
-      family = zero_inflated_negbinomial,
-      file = ".cache/removed/M_delfile_logical",
-      formula = bf(y ~ 1 + logDEL + DELFILE + (1 | team) + (1  | author),
-                   zi ~ 1 + logDEL + DELFILE),
-      prior = c(prior(normal(0, 0.25), class = b),
-                prior(normal(0, 0.25), class = b, dpar=zi),
-                prior(weibull(2, 1), class = sd),
-                prior(gamma(0.01, 0.01), class = shape)),
-      warmup = 1000,
-      iter  = ITERATIONS,
-      chains = 4,
-      cores = 4,
-      backend="cmdstanr",
-      file_refit = "on_change",
-      threads = threading(THREADS),
-      save_pars = save_pars(all = TRUE),
-      adapt_delta = ADAPT_DELTA)
-```
-
-The transpose operator in R, `t()` has a side effect of coercing all values to the same type.
-Thus, if we use the syntax `newdata <- data.frame(t(c(file=17, author=24, team=6, logDEL=log(100), DELFILE=F, DUP=10/scale_dupblocks$stddev)))`,
-the resulting data frame will have all numeric columns (other types are lost).
-
-This will result in complaints from brms when we want to predict values using newdata, if we try to specify the value as a logical (either the constant F, or `as.logical(FALSE)` yields the same result):
-We get `New factor levels are not allowed. Levels allowed: 'FALSE', 'TRUE'. Levels found: '0'`
-
-Bottom line - be wary of R, and in particular transpose operators (or other matrix operations). Create proper data frames instead, where each column has individual types!
-
-```{r}
-newdata <- data.frame(file=17, author=24, team=6, logDEL=log(100), DELFILE=F, DUP=10/scale_dupblocks$stddev)
-issues_predicted <- M_delfile_logical |> predicted_draws(newdata=newdata)
-```
-
-But, again - that is the frequentist way of thinking - only focusing on the beta for the "TRUE" value, and only estimating difference between the "FALSE" and the "TRUE".
-In a Bayesian way, we should handle it as a proper factor instead!
-
-```{r}
-data_factor <- data |> mutate(DELFILE_factor = as.factor(ifelse(DELFILE, 'a', 'b'))) |> select(team, author, logDEL, DELFILE_factor, DUP, y)
-M_delfile_as_factor <-
-  brm(data = data_factor,
-      family = zero_inflated_negbinomial,
-      file = ".cache/removed/M_delfile_as_factor",
-      formula = bf(y ~ 1 + logDEL + DELFILE_factor + DUP + (1 | team) + (1  | author),
-                   zi ~ 1 + logDEL + DELFILE_factor + DUP),
-      prior = c(prior(normal(0, 0.25), class = b),
-                prior(normal(0, 0.25), class = b, dpar=zi),
-                prior(weibull(2, 1), class = sd),
-                prior(gamma(0.01, 0.01), class = shape)),
-      warmup = 1000,
-      iter  = ITERATIONS,
-      chains = 4,
-      cores = 4,
-      backend="cmdstanr",
-      file_refit = "on_change",
-      threads = threading(THREADS),
-      save_pars = save_pars(all = TRUE),
-      adapt_delta = ADAPT_DELTA)
-```
-
-```{r}
-M_delfile_as_factor
+M_full_model <- add_criterion(M_full_model, "loo")
 ```
 
 
 ```{r}
-summary(data_factor)
+m <- M_full_model
+#stopifnot(rhat(m) < 1.01)
+#stopifnot(neff_ratio(m) > 0.2)
+mcmc_trace(m)
+```
+```{r}
+rhat(m) |> mcmc_rhat()
+neff_ratio(m) |> mcmc_neff()
 ```
 
-Weird thing is, we still cannot handle FALSE as a value in the factor. We still have to code the factor as numeric values, in order to feed it through newdata. Raised issue at brms https://github.com/paul-buerkner/brms/issues/1442 --- but it could well be a tidybayes issue as well.
+Both Rhat and Neff ratio looks good.
 
 ```{r}
-
-newdata <- data.frame(file=17, author=24, team=6, logDEL=log(100), DELFILE_factor='a', DUP=10/scale_dupblocks$stddev)
-issues_predicted <- M_delfile_as_factor |> predicted_draws(newdata=newdata)
-issues_predicted
+loo <- loo(m)
+loo
+plot(loo)
 ```
+
+We have 18 high Pareto k values, so we will have to refit the model 18 times
+
+Reloo will take about 3 hours per resampling, so safest to run it in the background while doing other productive tasks.
+
+```{r, eval=FALSE}
+reloo <- reloo(m, loo, chains=CHAINS)
+```
+
+### Model parameters
+
+```{r}
+summary(m)
+```
+
+```{r}
+ranef(m)
+```
+
+
+```{r}
+mcmc_areas(m, regex_pars = c("^b_", "^b_zi"))
+```
+
+```{r}
+mcmc_areas(m, regex_pars = c("^sd_"))
+```
+
+```{r}
+params <- c("Intercept", "A", "C", "D")
+lapply(params, function(p) mcmc_areas(m, regex_pars = paste0("^r_team[[].*,", p, "[]]")) + ggtitle(paste("Team-level difference for parameter", p)))
+```
+
+```{r}
+teams <- c("Arch", "Blue", "Brown", "Green", "Orange", "Pink", "Red", "UI", "Unknown", "Violet", "Yellow")
+lapply(params, function(p) lapply(teams, function(t) mcmc_areas(m, regex_pars = c(paste0("^r_team:repo[[]", t, ".*,", p, "[]]"))) + ggtitle(paste("Repo-level difference for team", t, "parameter", p))))
+```
+
+```{r}
+repos <- c("IntTest", "Jupiter", "Saturn", "Uranus", "Neptune", "Venus", "Mars", "Mercury")
+lapply(params, function(p) lapply(repos, function(r) mcmc_areas(m, regex_pars = c(paste0("^r_team:repo[[].*_", r,",", p, "[]]"))) + ggtitle(paste("Team-level differences for repo", r, "parameter", p))))
+```
+
+### Posterior Predictive Checks
+
+
+```{r}
+yrep <- posterior_predict(m)
+```
+
+Proportion of zeros
+
+```{r}
+ppc_stat(y = d$y, yrep, stat = function(y) mean(y == 0))
+```
+
+The zero-inflation seems to be working very well.
+
+The observed max value ranges falls well within the predicted max value for the individual observations. 
+Compared to the intercept-only model, the predicted max value are about a magnitude higher. This indicates that we might have some priors that are a bit too wild, or some imbalance in our data (which we know we have - some teams make few or no commits in some repos).
+But there are still no extreme max values (e.g. 1e6 or more - we know that the total number of observed lines of code is around 1e5, so it is impossible to have more that those amounts of duplicates).
+
+```{r}
+ppc_stat(y = d$y, yrep, stat = "max")
+```
+```{r}
+rootogram <- pp_check(m, type = "rootogram", style="suspended")
+```
+```{r}
+rootogram
+```
+
+Rootogram, sized according to reasonable (observed) values.
+
+```{r}
+rootogram + scale_y_continuous(limits=c(0, 35))  + scale_x_continuous(limits=c(0,150))
+```
+
+Our model slightly overestimates the number of introduced issues.
+
+### Conditional Effects
+
+```{r}
+ftotArch <- condeffect_logCOMPLEX_by_logADD(m, d, "Arch", "IntTest")
+ftotGreen <- condeffect_logCOMPLEX_by_logADD(m, d, "Green", "IntTest")
+ftotBlue <- condeffect_logCOMPLEX_by_logADD(m, d, "Blue", "IntTest")
+```
+
+How to read these conditional plots:
+
+* X axis is the continuously varying predictor (in a scaled log scale)
+* Y axis is the predicted number of introduced issues (in the natural count scale)
+* Existing observations for the observed team and repo are plotted as points.
+  * The color of the point is the value of the second predictor (rounded to the nearest integer value)
+  * The size of the point is the Pareto k value of the observations (larger size mean more influential points)
+* The lines are the predicted estimate of the y value
+  * The color of the line is the value of the second predictor (same as the observations)
+  * The intervals refer to the Q5.5-Q94.5 credible intervals. That is, we expect 89% of the predictions to be located inside these intervals.
+
+```{r}
+plot_logCOMPLEX_by_logADD(m, d, ftotArch, "Arch", "IntTest")
+```
+
+```{r}
+plot_logCOMPLEX_by_logADD(m, d, ftotGreen, "Green", "IntTest")
+```
+
+```{r}
+plot_logCOMPLEX_by_logADD(m, d, ftotBlue, "Blue", "IntTest")
+```
+
+
+In the IntTest repo, there is not much influence of the complexity on the number of introduced duplicates. But some teams (e.g. Green) have more impact than others (e.g. Arch)
+
+If we reverse the plots, and check the impact of added lines, relative to C and D
+
+```{r}
+ftotArch <- condeffect_logADD_by_logCOMPLEX(m, d, "Arch", "IntTest")
+ftotGreen <- condeffect_logADD_by_logCOMPLEX(m, d, "Green", "IntTest")
+ftotBlue <- condeffect_logADD_by_logCOMPLEX(m, d, "Blue", "IntTest")
+```
+
+```{r}
+plot_logADD_by_logCOMPLEX(m, d, ftotArch, "Arch", "IntTest") + scale_y_continuous(limits=c(0, 50))
+```
+
+```{r}
+plot_logADD_by_logCOMPLEX(m, d, ftotGreen, "Green", "IntTest") + scale_y_continuous(limits=c(0, 50))
+```
+```{r}
+plot_logADD_by_logCOMPLEX(m, d, ftotBlue, "Blue", "IntTest") + scale_y_continuous(limits=c(0, 50))
+```
+
+Again, we see that the complexity of the file has no significant impact on the number of introduced duplicates. The lines largely overlap.
+
+```{r}
+ftotArch <- condeffect_logADD_by_logDUP(m, d, "Arch", "IntTest")
+ftotGreen <- condeffect_logADD_by_logDUP(m, d, "Green", "IntTest")
+ftotBlue <- condeffect_logADD_by_logDUP(m, d, "Blue", "IntTest")
+```
+
+```{r}
+plot_logADD_by_logDUP(m, d, ftotArch, "Arch", "IntTest") + scale_y_continuous(limits=c(0, 50))
+plot_logADD_by_logDUP(m, d, ftotGreen, "Green", "IntTest") + scale_y_continuous(limits=c(0, 50))
+plot_logADD_by_logDUP(m, d, ftotBlue, "Blue", "IntTest")
+```
+
+For team Green, in particular, there seems to be an impact of the existing duplicates in the file. But for other teams, there is much less variation between the different D lines, so existing duplicates seem to play a smaller part.
+What is clear is that the number of added lines play a part in the number of introduced duplicates, as can be expected.
+
+### Looking at another repo (Jupiter)
+
+```{r}
+ftotArch <- condeffect_logADD_by_logCOMPLEX(m, d, "Arch", "Jupiter")
+ftotGreen <- condeffect_logADD_by_logCOMPLEX(m, d, "Green", "Jupiter")
+ftotBlue <- condeffect_logADD_by_logCOMPLEX(m, d, "Blue", "Jupiter")
+```
+
+```{r}
+plot_logADD_by_logCOMPLEX(m, d, ftotArch, "Arch", "Jupiter")  + scale_y_continuous(limits=c(0, 60))
+plot_logADD_by_logCOMPLEX(m, d, ftotGreen, "Green", "Jupiter")  + scale_y_continuous(limits=c(0, 60))
+plot_logADD_by_logCOMPLEX(m, d, ftotBlue, "Blue", "Jupiter")  + scale_y_continuous(limits=c(0, 60))
+```
+```{r}
+ftotArch <- condeffect_logADD_by_logDUP(m, d, "Arch", "Jupiter")
+ftotGreen <- condeffect_logADD_by_logDUP(m, d, "Green", "Jupiter")
+ftotBlue <- condeffect_logADD_by_logDUP(m, d, "Blue", "Jupiter")
+```
+
+```{r}
+plot_logADD_by_logDUP(m, d, ftotArch, "Arch", "Jupiter") + scale_y_continuous(limits=c(0, 25)) + scale_x_continuous(limits=c(-2, 3.2))
+plot_logADD_by_logDUP(m, d, ftotGreen, "Green", "Jupiter") + scale_y_continuous(limits=c(0, 25)) + scale_x_continuous(limits=c(-2, 3.2))
+plot_logADD_by_logDUP(m, d, ftotBlue, "Blue", "Jupiter") + scale_y_continuous(limits=c(0, 25)) + scale_x_continuous(limits=c(-2, 3.2))
+```
+In the Jupiter repo, we see clear team-level impacts of the existing number of duplicates The Arch team are unlikely to introduce more than a few duplicates, while the Green and Blue team are correspondingly more likely to introduce duplicates, provided that the magnitude of the number of added lines are 2 or more.
+
+```{r}
+bayes_R2(m)
+```
+
+```{r}
+loo_compare(M_intercepts_only, M_full_model)
+```
+
+```{r}
+bayes_R2(M_intercepts_only)
+```
+
+We see both from the `bayes_R2` and the `loo_compare` functions that the full model is to be preferred over the intercept-only model.
+But it still only explains about 50% of the variance in the data.
+
+

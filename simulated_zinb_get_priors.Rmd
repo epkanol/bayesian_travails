@@ -13,9 +13,9 @@ library(boot)
 ```
 
 ```{r}
-CHAINS <- 4
-CORES <- 4
-THREADS <- 4
+CHAINS <- 3
+CORES <- 2
+THREADS <- 2
 ```
 
 
@@ -230,7 +230,7 @@ inputData <- data.frame(A=A, C=C, D=D,
                         repo=rep(c(rep("R1", N/2),
                                    rep("R2", N/2))),
                         I=rep(c(rep(c(-0.5, -2), N/4),
-                                rep(c(1, 1), N/4))))
+                                rep(c(-1, -1.5), N/4))))
 
 logLambda <- inputData |> mutate(team = as.factor(team), 
                                  repo = as.factor(repo),
@@ -656,6 +656,10 @@ These intercepts distributions are really wide. And the general intercept parame
 But why is the residuals (I interpret r_ parameters as differences from the population mean) so wide? Otherwise, the expected value seems quite close to the real value.
 
 I suspect something to do with the prior settings (but I had 3500 samples for this simulation, so I would have expected the priors to have been overcome by now...)
+
+```{r}
+ranef(m)
+```
 
 
 Old way of doing conditional effects plots:
