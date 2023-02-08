@@ -59,6 +59,10 @@ data.frame(A=A) |> ggplot(aes(x=A)) + geom_histogram(bins = 50) + ggtitle("Scale
 ```
 
 ```{r}
+teams <- c("T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8")
+repos <- c("R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8")
+
+# just pick some offsets for team level intercepts
 t1 <- 0.4
 t2 <- 0.6
 t3 <- 0.8
@@ -196,7 +200,6 @@ M_recover_params <- brm(data=d,
 m <- M_recover_params 
 stopifnot(rhat(m) < 1.01)
 stopifnot(neff_ratio(m) > 0.2)
-teams <- c("T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8")
 ```
 
 ```{r}
@@ -210,21 +213,7 @@ lapply(plots, function(i) {
   })
 ```
 
-All trace plots look OK.
-
-```{r}
-mcmc_trace(m, regex_pars = "^sd_")
-
-```
-
-```{r}
-mcmc_trace(m, regex_pars = c("^r_g[0-9][[]"))
-```
-
-```{r}
-lapply(teams, function(t) mcmc_trace(m, regex_pars = c(paste0("^r_g1:g2[[]", t))))
-```
-
+All trace plots look OK. 
 
 ```{r}
 loo <- loo(m) 
@@ -233,6 +222,13 @@ plot(loo)
 
 Got some high pareto k values - could be that my lambda values are a bit on the extreme side...
 
+```{r, eval=FALSE}
+# enable if ypou want to do reloo for the 5 outlier observations
+reloo <- loo(m, reloo=T)
+reloo
+plot(reloo)
+```
+
 
 
 ```{r}
@@ -240,7 +236,7 @@ rhat(m) |> mcmc_rhat()
 neff_ratio(m) |> mcmc_neff()
 ```
 
-Everything samples fine, all diagnostics indicate well-fit model.
+R-hat and neff ratio are good, and the five observations with high Pareto k value are solved by the reloo. We can trust the model.
 
 ```{r}
 summary(m)
@@ -307,13 +303,33 @@ compared with the general parameters:
 
 shows that t2, t5 and t6 are particularly badly matched. The more extreme t7 and t8 values are better separated. Could be that our lambda function is not sensitive enough for highly positive values (relative to negative ones, that is)
 
-Looking at the posterior_linpred also show mean and median of 0.36, with quartiles ranging from 0.27 to 0.45, that is +/- 0.10 approximately. (This is before applying any link functions)
-
 ```{r}
 summary(posterior_linpred(m, newdata = data.frame(A = 0, C = 0, D = 0, g1 = "T1", g2 = "R1")))
 ```
 
+Looking at the posterior_linpred also show mean and median of 0.36, with quartiles ranging from 0.27 to 0.45, that is +/- 0.10 approximately. (This is before applying any link functions)
+Compared to the actual intercept value of 0.4-0.1=0.3, this is quite reasonable.
+
+R1 values for various teams:
+
+ t1-0.1, t2-0.2, t3-0.8, t4+0.1, t5+0.4, t6+0.7, t7-0.2, t8-0.4
+
+which gives
+
+ 0.3, 0.4, 0, 0.3, 0.3, 0.4, -0.7, -1.1
+ 
+```{r}
+lapply(teams, function (t) summary(posterior_linpred(m, newdata = data.frame(A = 0, C = 0, D = 0, g1 = t, g2 = "R1"))))
+```
+Group T1/R5, T1/R6 and T1/R8 seems a bit off, also related to the quartile intervals. But the true values all lie within the 
+
+T1 should have 0.3, 0.2, 0.1, 0, -0.1, -0.2, -0.3, -0.4
+```{r}
+lapply(repos, function (r) summary(posterior_linpred(m, newdata = data.frame(A = 0, C = 0, D = 0, g1 = "T1", g2 = r))))
+```
+
+Full posterior predictions are done via the `posterior_predict` function, as always.
+
 ```{r}
 summary(posterior_predict(m, newdata = data.frame(A = 0, C = 0, D = 0, g1 = "T1", g2 = "R1")))
 ```
-
