@@ -1,0 +1,215 @@
+---
+title: "MinimalExampleWideIntercepts"
+author: "Anders Sundelin"
+date: "2023-01-10"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(dplyr)
+library(boot)
+library(brms)
+library(tidybayes)
+library(bayesplot)
+```
+
+Adjust to suite your environment - this works for my Dell laptop:
+
+```{r}
+CHAINS <- 4
+CORES <- 4
+THREADS <- 4
+```
+
+# Generate raw data
+
+```{r}
+N <- 3500
+set.seed(20230104)
+
+# generate some values that mimic our real data
+ADD <- rlnorm(N, meanlog = 2.369, sdlog=1.4754)
+COMPLEX <- rlnorm(N, meanlog = 3.200, sdlog=1.3227)
+DUP <- rlnorm(N, meanlog = -0.7676, sdlog=2.267)
+
+# truncate values to get the integer parts, as we are measuring counts
+ADD <- trunc(ADD)
+COMPLEX <- trunc(COMPLEX)
+DUP <- trunc(DUP)
+```
+
+```{r}
+summary(ADD)
+summary(COMPLEX)
+summary(DUP)
+```
+
+# Transforming Raw Data, Generating Dependent Data
+
+```{r}
+logADD <- log(ADD+1)
+logCOMPLEX <- log(COMPLEX+1)
+logDUP <- log(DUP+1)
+A <- scale(logADD)
+C <- scale(logCOMPLEX)
+D <- scale(logDUP)
+data.frame(A=A) |> ggplot(aes(x=A)) + geom_histogram(bins = 50) + ggtitle("Scaled simulated logADD data")
+```
+
+```{r}
+inputData <- data.frame(A=A, C=C, D=D,
+                        g1=rep(c("T1", "T2"), N/2),
+                        g2=rep(c(rep("R1", N/2),
+                                   rep("R2", N/2))),
+                        I=rep(c(rep(c(-0.1, -0.2), N/4),
+                                rep(c(-0.3, 0.1), N/4))),
+                        Adelta=rep(c(rep(c(-0.05, -0.2), N/4),
+                                rep(c(0.1, 0.15), N/4)))
+                        
+                        )
+
+linModel <- inputData |> mutate(g1 = as.factor(g1), 
+                                 g2 = as.factor(g2),
+                                 logLambda = I +  1.2 * A + 0.8 * C + 0.6 * D)
+linModel |> ggplot(aes(x=logLambda)) + geom_histogram(bins = 50)
+```
+
+```{r}
+linModel |> ggplot(aes(x=exp(logLambda))) + geom_histogram(bins = 400)
+```
+
+## Full Binomial Model
+
+Construct the proper lambda (mu, in NB contexts), and just pick a value for size (25 is unrealistically large, but the problem shows regardless of size)
+
+```{r}
+mu <- exp(linModel$logLambda)
+size <- 25
+```
+
+Zero-inflation part - we have many zeros in our data
+
+```{r}
+untouched_logit <- logit(0.80) - 0.25 * A
+data.frame(p=inv.logit(untouched_logit)) |> ggplot(aes(x=p)) + geom_histogram(bins = 100)
+p <- inv.logit(untouched_logit)
+```
+
+```{r}
+prob_untouched <- p
+untouched <- rbinom(N, 1, prob_untouched)
+y <- (1-untouched) * rnbinom(N, mu=mu, size=size)
+df <- data.frame(y=y,
+                 A=A,
+                 C=C,
+                 D=D,
+                 g1=linModel$g1,
+                 g2=linModel$g2)
+df |> ggplot(aes(x=y)) + geom_histogram(bins=400) 
+
+```
+
+Zooming in:
+
+```{r}
+df |> ggplot(aes(x=y)) + geom_histogram(bins=400) + scale_y_continuous(limits=c(0,75))
+```
+
+```{r}
+summary(df)
+```
+
+## Building the BRMS Model
+
+```{r}
+d <- df
+get_prior(data=d,
+          family=zero_inflated_negbinomial,
+          formula=bf(y ~ 1 + A + D + C + (1 | g1/g2),
+                     zi ~ 1 + A))
+```
+
+```{r}
+M_recover_params <- brm(data=d,
+                        family=zero_inflated_negbinomial,
+                        formula=bf(y ~ 1 + A + D + C + (1 | g1/g2),
+                                   zi ~ 1 + A),
+                        prior = c(prior(normal(0, 0.5), class = Intercept),
+                                  prior(normal(0, 0.25), class = b),
+                                  prior(weibull(2, 1), class = sd),
+                                  prior(weibull(2, 1), class = sd, group=g1:g2),
+                                  prior(weibull(2, 1), class = sd, group=g1),
+                                  #prior(lkj(1), class = cor),
+                                  #prior(lkj(1), class = cor, group=g1),
+                                  #prior(lkj(1), class = cor, group=g1:g2),
+                                  prior(normal(0, 0.5), class = Intercept, dpar=zi),
+                                  prior(normal(0.5, 0.5), class = b, dpar=zi),
+                                  prior(gamma(1, 0.1), class = shape)),
+                        warmup=1000,
+                        iter=4000,
+                        chains=CHAINS,
+                        cores=CORES,
+                        threads=threading(THREADS),
+                        backend="cmdstanr",
+                        save_pars = save_pars(all=T),
+                        adapt_delta=0.95)
+```
+
+
+```{r trace-loo-checks}
+m <- M_recover_params 
+#stopifnot(rhat(m) < 1.01)
+#stopifnot(neff_ratio(m) > 0.2)
+mcmc_trace(m) # ok
+loo <- loo(m) 
+plot(loo)
+```
+
+```{r}
+rhat(m) |> mcmc_rhat()
+neff_ratio(m) |> mcmc_neff()
+```
+
+Everything samples fine, all diagnostics indicate well-fit model.
+
+```{r}
+summary(m)
+```
+
+```{r}
+inv.logit(1.55)
+```
+
+Betas are fine, close to their real values
+
+```{r}
+ranef(m)
+```
+
+Very wide CI for the intercepts
+
+### Parameter plots
+
+Normal betas
+
+```{r}
+mcmc_areas(m, regex_pars = c("^b_", "^b_zi"))
+```
+
+Intercepts
+
+```{r}
+mcmc_areas(m, regex_pars = c("^[^b].*ntercept"))
+```
+
+Question: Given that I have a realistic-looking data set, though unrealistically well-balanced (equal amount of data for each permutation of g1/g2), why are the CI for the intercept parameters so wide? 
+
+Regular betas shrink very well, when I increase the number of generated points (also tried with 35000 simulated points, which takes ~10 hours to complete, but the problem with the intercept remains there).
+
+I also experimented with decreasing the zero-inflation part, but the problem remains, as far as I can tell.
+```{r}
+
+```
+
