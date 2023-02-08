@@ -26,7 +26,7 @@ THREADS <- 4
 # Generate raw data
 
 ```{r}
-N <- 3500
+N <- 60 * 64 
 set.seed(20230104)
 
 # generate some values that mimic our real data
@@ -59,15 +59,36 @@ data.frame(A=A) |> ggplot(aes(x=A)) + geom_histogram(bins = 50) + ggtitle("Scale
 ```
 
 ```{r}
+t1 <- 0.4
+t2 <- 0.6
+t3 <- 0.8
+t4 <- 0.2
+t5 <- -0.1
+t6 <- -0.3
+t7 <- -0.5
+t8 <- -0.7
+
 inputData <- data.frame(A=A, C=C, D=D,
-                        g1=rep(c("T1", "T2"), N/2),
-                        g2=rep(c(rep("R1", N/2),
-                                   rep("R2", N/2))),
-                        I=rep(c(rep(c(-0.1, -0.2), N/4),
-                                rep(c(-0.3, 0.1), N/4))),
-                        Adelta=rep(c(rep(c(-0.05, -0.2), N/4),
-                                rep(c(0.1, 0.15), N/4)))
-                        
+                        g1=rep(c("T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8"), N/8),
+                        g2=rep(c(rep("R1", N/8),
+                                 rep("R2", N/8),
+                                 rep("R3", N/8),
+                                 rep("R4", N/8),
+                                 rep("R5", N/8),
+                                 rep("R6", N/8),
+                                 rep("R7", N/8),
+                                 rep("R8", N/8)
+                                 )),
+                        I=rep(c(rep(c(t1-0.1, t2-0.2, t3-0.8, t4+0.1, t5+0.4, t6+0.7, t7-0.2, t8-0.4), N/64), #  R1 values, per team
+                                rep(c(t1-0.2, t2-0.3, t3-0.7, t4+0.2, t5+0.3, t6+0.6, t7-0.3, t8-0.3), N/64), #  R2 values, per team
+                                rep(c(t1-0.3, t2-0.4, t3-0.6, t4+0.3, t5+0.2, t6+0.5, t7-0.4, t8-0.2), N/64), #  R3
+                                rep(c(t1-0.4, t2-0.5, t3-0.5, t4+0.4, t5+0.1, t6+0.4, t7-0.5, t8-0.1), N/64), #  R4
+                                rep(c(t1-0.5, t2-0.6, t3-0.4, t4-0.1, t5-0.4, t6+0.3, t7+0.5,  t8+0.4), N/64), # R5
+                                rep(c(t1-0.6, t2-0.7, t3-0.3, t4-0.2, t5-0.3, t6+0.2, t7+0.4,  t8+0.3), N/64), # R6
+                                rep(c(t1-0.7, t2-0.8, t3-0.2, t4-0.3, t5-0.2, t6+0.25, t7+0.3, t8+0.2), N/64), # R7
+                                rep(c(t1-0.8, t2-0.9, t3-0.1, t4-0.4, t5-0.1, t6+0.1, t7+ 0.2, t8+0.1), N/64)  # R8
+                                # first column: T1 across different R, and so on
+                                ))
                         )
 
 linModel <- inputData |> mutate(g1 = as.factor(g1), 
@@ -75,6 +96,13 @@ linModel <- inputData |> mutate(g1 = as.factor(g1),
                                  logLambda = I +  1.2 * A + 0.8 * C + 0.6 * D)
 linModel |> ggplot(aes(x=logLambda)) + geom_histogram(bins = 50)
 ```
+Sanity check that each g1/g2/I combination gets their own intercept
+
+```{r}
+inputData |> group_by(g1, g2, I) |> tally()
+```
+
+It does - so, the actual intercept value is deterministically (but not uniquely) determined by the g1/g2 combination. And we have a perfectly balanced dataset, with 60 observations of each g1/g2/I combination.
 
 ```{r}
 linModel |> ggplot(aes(x=exp(logLambda))) + geom_histogram(bins = 400)
@@ -125,28 +153,34 @@ summary(df)
 
 ```{r}
 d <- df
+formula <- bf(y ~ 0 + A + D + C + (1 | g1/g2),
+              zi ~ 1 + A)
 get_prior(data=d,
           family=zero_inflated_negbinomial,
-          formula=bf(y ~ 1 + A + D + C + (1 | g1/g2),
-                     zi ~ 1 + A))
+          formula=formula)
 ```
+
+```{r}
+priors <- c(prior(normal(0, 0.25), class = b),
+            prior(weibull(2, 1), class = sd),
+            prior(weibull(2, 1), class = sd, group=g1:g2),
+            prior(weibull(2, 1), class = sd, group=g1),
+            prior(normal(0, 0.5), class = Intercept, dpar=zi),
+            prior(normal(0.5, 0.5), class = b, dpar=zi),
+            prior(gamma(1, 0.1), class = shape)
+            )
+validate_prior(data = d,
+               family = zero_inflated_negbinomial,
+               formula = formula,
+               prior = priors)
+```
+
 
 ```{r}
 M_recover_params <- brm(data=d,
                         family=zero_inflated_negbinomial,
-                        formula=bf(y ~ 1 + A + D + C + (1 | g1/g2),
-                                   zi ~ 1 + A),
-                        prior = c(prior(normal(0, 0.5), class = Intercept),
-                                  prior(normal(0, 0.25), class = b),
-                                  prior(weibull(2, 1), class = sd),
-                                  prior(weibull(2, 1), class = sd, group=g1:g2),
-                                  prior(weibull(2, 1), class = sd, group=g1),
-                                  #prior(lkj(1), class = cor),
-                                  #prior(lkj(1), class = cor, group=g1),
-                                  #prior(lkj(1), class = cor, group=g1:g2),
-                                  prior(normal(0, 0.5), class = Intercept, dpar=zi),
-                                  prior(normal(0.5, 0.5), class = b, dpar=zi),
-                                  prior(gamma(1, 0.1), class = shape)),
+                        formula=formula,
+                        prior=priors,
                         warmup=1000,
                         iter=4000,
                         chains=CHAINS,
@@ -160,12 +194,46 @@ M_recover_params <- brm(data=d,
 
 ```{r trace-loo-checks}
 m <- M_recover_params 
-#stopifnot(rhat(m) < 1.01)
-#stopifnot(neff_ratio(m) > 0.2)
-mcmc_trace(m) # ok
+stopifnot(rhat(m) < 1.01)
+stopifnot(neff_ratio(m) > 0.2)
+teams <- c("T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8")
+```
+
+```{r}
+p <- mcmc_trace(m)
+pars <- levels(p[["data"]][["parameter"]])
+plots <- seq(1, to=length(pars), by=12)
+lapply(plots, function(i) { 
+  start <- i
+  end <- start+11
+  mcmc_trace(m, pars = na.omit(pars[start:end]))
+  })
+```
+
+All trace plots look OK.
+
+```{r}
+mcmc_trace(m, regex_pars = "^sd_")
+
+```
+
+```{r}
+mcmc_trace(m, regex_pars = c("^r_g[0-9][[]"))
+```
+
+```{r}
+lapply(teams, function(t) mcmc_trace(m, regex_pars = c(paste0("^r_g1:g2[[]", t))))
+```
+
+
+```{r}
 loo <- loo(m) 
 plot(loo)
 ```
+
+Got some high pareto k values - could be that my lambda values are a bit on the extreme side...
+
+
 
 ```{r}
 rhat(m) |> mcmc_rhat()
@@ -179,7 +247,7 @@ summary(m)
 ```
 
 ```{r}
-inv.logit(1.55)
+inv.logit(1.40)
 ```
 
 Betas are fine, close to their real values
@@ -198,18 +266,54 @@ Normal betas
 mcmc_areas(m, regex_pars = c("^b_", "^b_zi"))
 ```
 
-Intercepts
+Variation in intercepts across groups
 
 ```{r}
-mcmc_areas(m, regex_pars = c("^[^b].*ntercept"))
+mcmc_areas(m, regex_pars = c("^sd"))
 ```
 
-Question: Given that I have a realistic-looking data set, though unrealistically well-balanced (equal amount of data for each permutation of g1/g2), why are the CI for the intercept parameters so wide? 
+First group level intercepts
 
-Regular betas shrink very well, when I increase the number of generated points (also tried with 35000 simulated points, which takes ~10 hours to complete, but the problem with the intercept remains there).
-
-I also experimented with decreasing the zero-inflation part, but the problem remains, as far as I can tell.
 ```{r}
+mcmc_areas(m, regex_pars = c("^r_g[0-9][[]"))
+```
 
+Second, nested, group level intercepts.
+
+```{r}
+lapply(teams, function(t) mcmc_areas(m, regex_pars = c(paste0("^r_g1:g2[[]", t))))
+```
+
+Adding more levels to the model does cause the intercept CIs to shrink - but there are still some weirdness, for instance related to T1/R1, T1/R2, T1/R3 (which should be decreasing, 0.3, 0.2, 0.1, but the plot does not reveal this ratio --- on the contrary, t1/r3 is expected to be higher than both t1/r1 and t1/r2). Also, the Tn-level factors are not well separated out from the repo-level changes.
+
+It does help to remove the population-level intercept though (which we anyway do not have, as we decide all our intercepts by the group combination). 
+That caused the group-level CIs to shrink a bit more - but some weirdnesses remain. But the general pattern is anyway helping out, for the most parameters.
+
+
+```{r}
+ranef(m)$g1
+```
+
+compared with the general parameters:
+
+* t1 <- 0.4
+* t2 <- 0.6
+* t3 <- 0.8
+* t4 <- 0.2
+* t5 <- -0.1
+* t6 <- -0.3
+* t7 <- -0.5
+* t8 <- -0.7
+
+shows that t2, t5 and t6 are particularly badly matched. The more extreme t7 and t8 values are better separated. Could be that our lambda function is not sensitive enough for highly positive values (relative to negative ones, that is)
+
+Looking at the posterior_linpred also show mean and median of 0.36, with quartiles ranging from 0.27 to 0.45, that is +/- 0.10 approximately. (This is before applying any link functions)
+
+```{r}
+summary(posterior_linpred(m, newdata = data.frame(A = 0, C = 0, D = 0, g1 = "T1", g2 = "R1")))
+```
+
+```{r}
+summary(posterior_predict(m, newdata = data.frame(A = 0, C = 0, D = 0, g1 = "T1", g2 = "R1")))
 ```
 
