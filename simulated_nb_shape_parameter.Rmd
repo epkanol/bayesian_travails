@@ -1,0 +1,713 @@
+---
+title: "ZeroInflatedPoisson"
+author: "Anders Sundelin"
+date: "2022-10-18"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(dplyr)
+library(boot)
+```
+
+# Simulating standard Negative Binomial
+
+We want to understand how brms handles the shape parameter in the negative binomial distribution.
+
+```{r}
+# input the requested mean and sd, output is the mu of the rlnorm
+rlnorm_mu <- function(mean, sd) {
+  log(mean^2/sqrt(mean^2+sd^2))
+}
+rlnorm_sd <- function(mean, sd) {
+  sqrt(log(1+sd^2/mean^2))
+}
+
+mu_added <- rlnorm_mu(31.76, 88.80997)
+sd_added <- rlnorm_sd(31.76, 88.80997)
+```
+
+
+```{r}
+N <- 350
+set.seed(20230104)
+
+ADD <- rlnorm(N, meanlog = mu_added, sdlog=sd_added)
+COMPLEX <- rlnorm(N, meanlog = mu_complex, sdlog=sd_complex)
+DUP <- rlnorm(N, meanlog = mu_dup, sdlog=sd_dup)
+```
+
+The main thing to look for is the maximum value (is it reasonable, within an order of magnitude), number of zeros/extremely low values, and the shape in between. We want to have a sharp right-skewed distribution, as that is how our own data looks like.
+
+All three of our predictors have a similar shape, so we use the same formula to simulate them, though all use repeated draws from the exponential distribution.
+
+```{r}
+data.frame(add=DUP) |> ggplot(aes(x=add)) + geom_histogram(binwidth = 1) + ggtitle("Simulated DUP data")
+```
+
+The overall shape looks similar to our original dataset.
+As we are looking for integer counts, it seems plausible we could truncate the logarithms to get to the integer part. This will allow us to reach the value `0`, which features a lot in our data.
+
+```{r}
+ADD <- trunc(ADD)
+COMPLEX <- trunc(COMPLEX)
+DUP <- trunc(DUP)
+```
+
+Proportion of zeros in the resulting data set:
+
+```{r}
+z <- data.frame(a=DUP) |> filter(a == 0) |> tally()
+z/length(DUP)
+```
+
+So, our ADD only has 4.5% zeros in itself. Our model has 15%
+Our COMPLEX is an even worse fit, it has 1.4%, versus the real 11.8%
+DUP has 16.2%, whereas the real has 60%. If we double the sd, we will at least get 31.1% zeros. Not enough, but still something...
+Clearly, the DUP statistics does not follow a proper lognormal distribution, something else is influencing the large number of zeros.
+
+All of our data underestimate the number of zeros in our simulated model. 
+
+If we squeeze down the mean of DUP by taking the logarithm of the mean, we can get 80% zeros there, more than we have in the existing data.
+Squaring the mean, and taking the logarithm, means we again got down to 62% zeros after truncationg. 
+
+```{r}
+data.frame(add=trunc(ADD)) |> ggplot(aes(x=add)) + geom_histogram(binwidth = 1) + ggtitle("Simulated ADD data")
+
+```
+```{r}
+summary(ADD)
+```
+
+```{r}
+summary(COMPLEX)
+```
+```{r}
+summary(DUP)
+```
+
+Which distribution we use is not that important, just that its values are reasonably true to the form of the collected data.
+
+Due to the right-skewedness, our model uses the logarithm of the datapoints in the linear regression. Otherwise the very few extreme values will have extremely high leverage over the shape of the linear model.
+This also means that the linear model will be based on the _magnitude_ of the change in parameter (e.g. 0, 1, 2.7, 7.3, 19.8 added lines/existing complexity). So each individual line will have marginally lower impact, but the scale of the parameter will still matter.
+
+```{r}
+logADD <- log(ADD+1)
+logCOMPLEX <- log(COMPLEX+1)
+logDUP <- log(DUP+1)
+```
+
+As we know that our true parameters have a lower bound of 0, we add 1 to the parameter before taking the logarithm.
+
+Our linear regression parameters are less spread out, but the lower bound is still 0 (meaning zero added lines):
+
+```{r}
+data.frame(logADD=logADD) |> ggplot(aes(x=logADD)) + geom_histogram(bins = 50) + ggtitle("Simulated logADD data")
+```
+```{r}
+data.frame(x=logCOMPLEX) |> ggplot(aes(x=x)) + geom_histogram(bins = 50) + ggtitle("Simulated logCOMPLEX data")
+data.frame(x=logDUP) |> ggplot(aes(x=x)) + geom_histogram(bins = 50) + ggtitle("Simulated logDUP data")
+
+```
+
+
+So, now we have three parameters that should reasonably well resemble our own data, even if the underlying process is totally different.
+
+We follow recommendations from McElreath and others, and scale our log values -- this fixes the standard deviation to 1, and centers around the mean of the logarithm.
+```{r}
+A <- scale(logADD)
+C <- scale(logCOMPLEX)
+D <- scale(logDUP)
+
+summary(A)
+```
+
+```{r}
+data.frame(A=A) |> ggplot(aes(x=A)) + geom_histogram(bins = 50) + ggtitle("Scaled simulated logADD data")
+```
+
+This means that the intercept parameter (0) is to be interpreted as the `mean magnitude` of the parameter.
+Negative values represent values with a lower magnitude, and higher represent a higher magnitude.
+
+## Inventing a Linear Model based on our generated data
+
+Next, we come up with some coefficients that we want our priors and our model to retrieve.
+
+Thinking about the true data generating process, we state the following:
+
+* Because of scaling, our intercept will reflect the mean magnitude of the parameters.
+* It is likely that there are zero issues introduced if there are very few lines added or removed. So the zero inflation part of the model should reflect the number of added lines - when the number of added lines are low, there should be a comparatively high chance of introducing zero issues.
+* Furthermore, it seems likely that the direction of the relationship between predictors and logLambda would be positive, or at least non-negative, overall. We do not expect the number of introduced issues to decrease as either of the predictors increase (but the effect could still be zero, i.e. no relationship)
+
+For our analysis, we use the following formula:
+
+```{r}
+logLambda <- -0.5 +  1.2 * A + 0.8 * C + 0.6 * D
+data.frame(logLambda=logLambda) |> ggplot(aes(x=logLambda)) + geom_histogram(bins = 50)
+```
+
+Check that the generated data produces reasonably well behaved outcomes
+
+```{r}
+data.frame(lambda=exp(logLambda)) |> ggplot(aes(x=lambda)) + geom_histogram(bins = 400)
+```
+
+Construct the full negative binomial model. To help understand the impact of the shape parameter: https://influentialpoints.com/Training/negative_binomial_distribution-principles-properties-assumptions.htm
+
+After shape about 8, the distribution becomes essentially symmetrical. We still have a very right-skewed distribution in our data, so we believe the shape is lower than that (though perhaps not below 1-2). On the other hand, we would expect the zero-inflation to handle the zeros. But if the distribution was symmetrical, with a large shape parameter, we would perhaps see a bump
+
+```{r}
+mu <- exp(logLambda)
+size <- 25
+data.frame(count=rnbinom(350, mu=mu, size=size)) |> ggplot(aes(x=count)) + geom_histogram(bins=400)
+```
+
+Now construct the zero-inflation part. We start off with introducing 80% zeros, for the mean added lines (A == 0), and then decreasing that the more lines that were added.
+
+```{r}
+untouched_logit <- logit(0.80) - 0.25 * A
+data.frame(p=inv.logit(untouched_logit)) |> ggplot(aes(x=p)) + geom_histogram(bins = 100)
+p <- inv.logit(untouched_logit)
+```
+```{r}
+prob_untouched <- p
+untouched <- rbinom(N, 1, prob_untouched)
+introd <- (1-untouched) * rnbinom(N, mu=mu, size=size)
+```
+
+
+This gives the following distribution of data.
+
+```{r}
+data.frame(introd=introd) |> ggplot(aes(x=introd)) + geom_histogram(bins=400) 
+```
+```{r}
+summary(introd)
+sd(introd)
+```
+
+```{r}
+z <- data.frame(introd=introd) |> filter(introd == 0) |> tally()
+z$n/N
+```
+
+
+So, we have very many zeros (about 88.5%, that is, 300 out of 350. Some outliers range up to about 150 issues). But most of the non-zeros are below 10-20.
+
+Can we use this data to recover our parameters from the linear model? 
+
+## Recovering the model parameters
+
+```{r}
+library(brms)
+library(tidybayes)
+library(bayesplot)
+```
+
+Argumenting for the priors:
+
+* For the betas on logADD, logDUP and logCOMPLEX, we take a cautious approach, and state a prior or Normal(0, 0.25). On the log-scale, this means that on average, we expect "no change" for a beta, but allow 95% of the prior probability to vary between -0.5 and 0.5 (+/- 2 std.dev from mean).
+* We do expect the intercept for the zero-inflation to be positive. At 0, the logit-link of the zi-part determines that there is 50% chance of seeing a zero. And we have many more zeros in our data than 50% (about 80%, judging from the histogram above). We set a prior of Normal(1, 0.25), which corresponds to having 95% probability between $inv_logit(0.5) = 0.62$ and $inv_logit(1.5) = 0.81$.
+* The shape parameter is really tricky. With some experimentation, we decide to move away from the default $gamma(0.01,0.01)$ to $gamma(1, 0.25)$. The analysis for that is performed below.
+
+
+With a the default shape prior of gamma(0.01,0.01), and 3500 samples, we immediately retrieve an estimate close to the real shape, albeit with a wide 95% CI interval, [16,151].
+
+With shape prior of $Cauchy(0,25)$, and 350 samples, we got 7 divergent transitions.
+Changing instead to $Gamma(3, 0.1)$, still 350 samples, sampled OK, but had 2 high Pareto k values that was solved by reloo. But the posterior looked almost like the prior, indicating that the prior might have been too strong.
+Changing instead to $Gamma(1, 0.1)$, still 350 samples, sampled OK, but had 1 high Pareto k alue, 2 low neff_ratio values (lower than 0.1 threshold), and the model failed to find the correct shape value.
+Default shape prior $Gamma(0.01, 0.01)$, still 350 samples, sampled OK, but had 1 high Pareto k value, solved by reloo. How shall I interpret the brms shape parameter? Should it be 25, or 0.04 (1/25)?
+
+```{r}
+d <- data.frame(y=introd, logADD=A, logDUP=D, logCOMPLEX=C)
+M_recover_params <- brm(data=d,
+                        family=zero_inflated_negbinomial,
+                        formula=bf(y ~ 1 + logADD + logDUP + logCOMPLEX ,
+                                   zi ~ 1 + logADD),
+                        prior = c(prior(normal(0, 0.5), class = Intercept),
+                                  prior(normal(0, 0.25), class = b),
+                                  prior(normal(0, 0.25), class = Intercept, dpar=zi),
+                                  prior(normal(0, 0.25), class = b, dpar=zi),
+                                  prior(gamma(0.01, 0.01), class = shape)),
+                        warmup=1000,
+                        iter=4000,
+                        chains=4,
+                        cores=4,
+                        backend="cmdstanr",
+                        save_pars = save_pars(all=T),
+                        adapt_delta=0.95)
+```
+
+```{r}
+m <- M_recover_params 
+stopifnot(rhat(m) < 1.01)
+stopifnot(neff_ratio(m) > 0.2)
+mcmc_trace(m) # ok
+loo <- loo(m) 
+plot(loo)
+
+```
+
+
+
+```{r}
+m <- M_recover_params 
+stopifnot(rhat(m) < 1.01)
+stopifnot(neff_ratio(m) > 0.2)
+mcmc_trace(m) # ok
+loo <- loo(m) 
+plot(loo)
+```
+
+```{r}
+loo <- loo(m, moment_match = T, reloo=T)
+plot(loo)
+```
+```{r}
+m <- add_criterion(m, "loo")
+loo
+```
+
+How does Rhat and neff_ratio compare?
+
+```{r}
+rhat(m) |> mcmc_rhat()
+neff_ratio(m) |> mcmc_neff() # + scale_x_continuous(limits=c(0, 0.5))
+```
+All $\hat{R}$ values are ok (close to 1), and also the n_eff_ratio are much greater than 0.1, which is commonly used as a cut-off threshold.
+
+We should be able to trust our model.
+
+How does it compare?
+
+```{r}
+summary(m)
+```
+
+The zero-inflation intercept are estimated to be $inv\_logit(1.25)$, which corresponds to 0.78
+
+```{r}
+inv.logit(1.25)
+```
+
+This is close to our original parameter, 0.80, for only 350 data points. If we had more data, we would get closer.
+
+Credible interval would be between 0.69 and 1.71, and the slope is estimated to -0.10, but with a very wide Credible Interval on the logit scale (-0.49 to 0.24).
+
+```{r}
+inv.logit(c(0.72, 1.74))
+```
+
+The intercept is estimated to be between -1.65 and -0.95, with a point estimate of -1.3, close to our specified -1.5 target.
+
+The coefficient for logADD are specified as between 0.82 and 0.94, with a point estimate of 0.88. The real value is 0.90, close to the estimate.
+
+The coefficient for logDUP are specified as between 0.05 and 0.23, with a point estimate of 0.14, slightly lower than the real 0.20.
+Likewise, the estimate for logCOMPLEX are specified as between 0.60 and 0.71, with a point estimate of 0.66, slightly lower than the real 0.70.
+
+
+### Prior vs posterior
+
+Be aware that R `rgamma` uses shape and rate, or shape and scale. Rate parameter is the inverse of the scale - so `rate=0.1` is scale `10`. https://bookdown.org/content/4857/monsters-and-mixtures.html#over-dispersed-counts
+Stan uses shape $\alpha$ and rate (inverse scale) $\beta$. https://mc-stan.org/docs/2_21/functions-reference/gamma-distribution.html
+
+
+```{r}
+post <- as_draws_df(m)
+
+gamma_prior <- data.frame(x=rgamma(N, shape=0.01, rate=0.01))
+cauchy_prior <- data.frame(x=rcauchy(N, location=0, scale=25))
+
+post %>%
+      ggplot() +
+      geom_density(data = gamma_prior, aes(x=x),
+                   color = "transparent", fill = "blue", alpha = .5) +
+      geom_density(aes(x = shape),
+                   color = "transparent", fill = "#A65141", alpha = .5) +
+      annotate(geom = "text", 
+               x = c(20, 5), y = c(0.15, 0.15), 
+               label = c("posterior", "prior"), 
+               color = c("#A65141", "blue")) +
+      scale_x_continuous(limits = c(0,1)) +
+      scale_y_continuous(limits = c(0,10)) +
+      ggtitle("NegBinom Shape parameter, prior and posterior, limited to [0,1]", 
+              subtitle = "Prior distribution is wider still") +
+      geom_vline(xintercept=0.04) +
+      labs(x = "gamma shape distribution")
+
+```
+
+
+
+### Conditional effects
+```{r}
+nd <- d |> mutate(logADD=0, logDUP=0, logCOMPLEX=seq(from=-2, to=5, length.out=N))
+nd1 <- d |> mutate(logADD=1, logDUP=0, logCOMPLEX=seq(from=-2, to=5, length.out=N))
+nd2 <- d |> mutate(logADD=2, logDUP=0, logCOMPLEX=seq(from=-2, to=5, length.out=N))
+nd3 <- d |> mutate(logADD=3, logDUP=0, logCOMPLEX=seq(from=-2, to=5, length.out=N))
+
+
+
+f <- fitted(m, newdata=nd, probs=c(.055, .945)) |> data.frame() |> bind_cols(nd)
+f1 <- fitted(m, newdata=nd1, probs=c(.055, .945)) |> data.frame() |> bind_cols(nd)
+f2 <- fitted(m, newdata=nd2, probs=c(.055, .945)) |> data.frame() |> bind_cols(nd)
+f3 <- fitted(m, newdata=nd3, probs=c(.055, .945)) |> data.frame() |> bind_cols(nd)
+f |> ggplot(aes(x=logCOMPLEX)) + 
+  geom_smooth(aes(y=Estimate, ymin=Q5.5, ymax=Q94.5), stat="identity", alpha=.25, size=.5) + 
+  geom_smooth(data=f1, aes(y=Estimate, ymin=Q5.5, ymax=Q94.5), stat="identity", alpha=.25, size=.5, color="red") + 
+  geom_smooth(data=f2, aes(y=Estimate, ymin=Q5.5, ymax=Q94.5), stat="identity", alpha=.25, size=.5, color="green") + 
+  geom_smooth(data=f3, aes(y=Estimate, ymin=Q5.5, ymax=Q94.5), stat="identity", alpha=.25, size=.5, color="yellow") + 
+  geom_point(data=bind_cols(d, m$criteria$loo$diagnostics), aes(y=y, size = pareto_k), alpha=0.2)
+```
+Rescaling to better show the relationship
+
+```{r}
+f |> ggplot(aes(x=logCOMPLEX)) + 
+  geom_smooth(aes(y=Estimate, ymin=Q5.5, ymax=Q94.5), stat="identity", alpha=.25, size=.5) + 
+  geom_smooth(data=f1, aes(y=Estimate, ymin=Q5.5, ymax=Q94.5), stat="identity", alpha=.25, size=.5, color="red") + 
+  geom_smooth(data=f2, aes(y=Estimate, ymin=Q5.5, ymax=Q94.5), stat="identity", alpha=.25, size=.5, color="green") + 
+  geom_smooth(data=f3, aes(y=Estimate, ymin=Q5.5, ymax=Q94.5), stat="identity", alpha=.25, size=.5, color="yellow") + 
+  geom_point(data=bind_cols(d, m$criteria$loo$diagnostics), aes(y=y, size = pareto_k), alpha=0.2) + scale_y_continuous(limits=c(0,25))
+
+```
+
+```{r}
+nd <- d |> mutate(logCOMPLEX=0, logDUP=0, logADD=seq(from=-2, to=5, length.out=N))
+nd1 <- d |> mutate(logCOMPLEX=1, logDUP=0, logADD=seq(from=-2, to=5, length.out=N))
+nd2 <- d |> mutate(logCOMPLEX=2, logDUP=0, logADD=seq(from=-2, to=5, length.out=N))
+nd3 <- d |> mutate(logCOMPLEX=3, logDUP=0, logADD=seq(from=-2, to=5, length.out=N))
+
+f <- fitted(m, newdata=nd, probs=c(.055, .945)) |> data.frame() |> bind_cols(nd)
+f1 <- fitted(m, newdata=nd1, probs=c(.055, .945)) |> data.frame() |> bind_cols(nd)
+f2 <- fitted(m, newdata=nd2, probs=c(.055, .945)) |> data.frame() |> bind_cols(nd)
+f3 <- fitted(m, newdata=nd3, probs=c(.055, .945)) |> data.frame() |> bind_cols(nd)
+
+f |> ggplot(aes(x=logADD)) + 
+  geom_smooth(aes(y=Estimate, ymin=Q5.5, ymax=Q94.5), stat="identity", alpha=.25, size=.5) + 
+  geom_smooth(data=f1, aes(y=Estimate, ymin=Q5.5, ymax=Q94.5), stat="identity", alpha=.25, size=.5, color="red") + 
+  geom_smooth(data=f2, aes(y=Estimate, ymin=Q5.5, ymax=Q94.5), stat="identity", alpha=.25, size=.5, color="green") + 
+  geom_smooth(data=f3, aes(y=Estimate, ymin=Q5.5, ymax=Q94.5), stat="identity", alpha=.25, size=.5, color="yellow") + 
+  geom_point(data=bind_cols(d, m$criteria$loo$diagnostics), aes(y=y, size = pareto_k), alpha=0.2)
+```
+
+
+```{r}
+f |> ggplot(aes(x=logADD)) + geom_smooth(aes(y=Estimate, ymin=Q5.5, ymax=Q94.5), stat="identity", alpha=.25, size=.5) + 
+  geom_smooth(data=f1, aes(y=Estimate, ymin=Q5.5, ymax=Q94.5), stat="identity", alpha=.25, size=.5, color="red") + 
+  geom_smooth(data=f2, aes(y=Estimate, ymin=Q5.5, ymax=Q94.5), stat="identity", alpha=.25, size=.5, color="green") + 
+  geom_smooth(data=f3, aes(y=Estimate, ymin=Q5.5, ymax=Q94.5), stat="identity", alpha=.25, size=.5, color="yellow") + 
+  geom_point(data=bind_cols(d, m$criteria$loo$diagnostics), aes(y=y, size = pareto_k), alpha=0.2) + scale_y_continuous(limit=c(0,25))
+```
+
+```{r}
+nd <- d |> mutate(logCOMPLEX=0, logADD=0, logDUP=seq(from=-2, to=5, length.out=N))
+
+f <- fitted(m, newdata=nd, probs=c(.055, .945)) |> data.frame() |> bind_cols(nd)
+f |> ggplot(aes(x=logDUP)) + geom_smooth(aes(y=Estimate, ymin=Q5.5, ymax=Q94.5), stat="identity", alpha=.25, size=.5) + 
+  geom_point(data=bind_cols(d, m$criteria$loo$diagnostics), aes(y=y, size = pareto_k), alpha=0.8)
+
+```
+```{r}
+f |> ggplot(aes(x=logDUP)) + geom_smooth(aes(y=Estimate, ymin=Q5.5, ymax=Q94.5), stat="identity", alpha=.25, size=.5) + 
+  geom_point(data=bind_cols(d, m$criteria$loo$diagnostics), aes(y=y, size = pareto_k), alpha=0.8) + scale_y_continuous(limit=c(0,25))
+
+```
+
+
+Much of the pull upwards are being done by the outlier.
+
+
+## Posterior predictions
+
+We can visualize how our model compares related to the simulated data by doing posterior predictive checks.
+
+```{r}
+yrep_zinb <- posterior_predict(m)
+```
+
+The proportion of zeros fall straight in line with the observed ratio, about 0.84. These are zeros occurring regardless of the zero-inflation or the negative binomial. Our model thinks that about 77%-86% of commits would have zero issues introduced. The real (simulated) proportion is about 84%.
+
+```{r}
+ppc_stat(y = d$y, yrep_zinb, stat = function(y) mean(y == 0))
+```
+
+The maximum value simulated ranges between 100 to about 2000. The larger values are unrealistic, and in particular the peak around 1000 seems to warrant further scrutiny. But the largest peak occurs straight where we expected the max value to be (which was 257 issues, according to our simulation).
+
+```{r}
+ppc_stat(y = d$y, yrep_zinb, stat = "max") # + scale_x_continuous(limits=c(0,2000))
+```
+
+```{r}
+max(yrep_zinb)
+```
+
+For ZINB distributions, suspended rootograms are recommended by Kleiber and Zeileis (2016).
+These rootograms show the difference between observed and expected counts, with bars hanging from the zero-line rather than the expected count line. Therefore we can think of this rootogram as showing information about the model residuals.
+
+```{r}
+pp_check(m, type = "rootogram", style="suspended")
+```
+
+
+```{r}
+pp_check(m, type = "rootogram", style="suspended") + scale_x_continuous(limits = c(0,100)) + ggtitle("Suspended rootogram beween 0 and 100.")
+
+```
+
+It appears that the priors did their job, and allowed the data to shine through.
+
+
+The conditional effect show the effect of varying one parameter, keeping all the others in the model constant (usually at their mean value). We see the comparatively larger impact of logADD and logCOMPLEX, relative to logADD (as we specified in our model, by giving them larger coefficients).
+
+```{r}
+plot(conditional_effects(m), ask = FALSE)
+
+```
+Graphically inspecting the parameters can also be done via mcmc_areas:
+
+```{r}
+mcmc_areas(m, regex_pars = c("^b_", "^b_zi"))
+```
+
+### Prior predictive checks
+
+We can get some truly awful priors 
+
+```{r}
+M_horrible_prior_selection <- brm(data=d,
+                        family=zero_inflated_negbinomial,
+                        formula=bf(y ~ 0 + Intercept + logADD + logDUP + logCOMPLEX,
+                                   zi ~ 1),
+                        prior = c(prior(normal(0, 0.1), coef = Intercept),
+                                  prior(normal(0, 0.01), class = b),
+                                  prior(normal(0, 0.6), class = Intercept, dpar=zi),
+                                  prior(gamma(0.1, 1), class = shape)),
+                        sample_prior = "only",
+                        warmup=1000,
+                        iter=2000,
+                        chains=2,
+                        cores=2,
+                        backend="cmdstanr",
+                        save_pars = save_pars(all=T),
+                        adapt_delta=0.95)
+```
+
+```{r}
+loo(M_horrible_prior_selection)
+```
+
+With the horrible priors, we get 16% awful Pareto values.
+```{r}
+yrep_zinb <- posterior_predict(M_horrible_prior_selection)
+ppc_stat(y = d$y, yrep_zinb, stat = function(y) mean(y == 0))
+ppc_stat(y = d$y, yrep_zinb, stat = "max") # + scale_x_continuous(limits=c(0,2000))
+max(yrep_zinb)
+```
+
+There are instances of around 20000 introduced issues. Also, we see that the zero-inflation is highly overestimated (many cases of proportion of zeros being close to 1.0)
+
+With default shape priors (gamma(0.01, 0.01)), we get lot of 10% Pareto values > 0.7 and 10% > 1.0. This gamma(0.1,0.1) is better.
+```{r}
+get_prior(data=d,
+                        family=zero_inflated_negbinomial,
+                        formula=bf(y ~ 0 + Intercept + logADD + logDUP + logCOMPLEX,
+                                   zi ~ 1 + logADD))
+```
+
+https://bookdown.org/content/4857/monsters-and-mixtures.html
+Within brms, priors using the gamma distribution are based on the shape-rate (α-θ) parameterization. This is what Gamma(0.01,0.01) looks like
+
+```{r}
+shapedf <- tibble(x=seq(from = 0, to = 60, by = .1),
+                      y001001=dgamma(x, shape=0.01, rate=0.01), 
+                      y01001=dgamma(x, shape=0.1, rate=0.01), 
+                      y0101=dgamma(x, shape=0.1, rate=0.1), 
+                      y11=dgamma(x, shape=1, rate=1))
+
+shapedf |> ggplot(aes(x = x)) + 
+  geom_area(aes(y=y11), color="transparent", fill = "white", alpha=0.8) +
+  geom_area(aes(y=y001001), color="transparent", fill = "red", alpha=0.2) +
+  scale_x_continuous(limits=c(0, 10)) +
+#  scale_y_continuous(limits=c(0, 0.2)) +
+  ggtitle(expression(brms~negbin~gamma~shape~prior),
+          subtitle = "The red brms default (0.01, 0.01) allows a broader range of shapes (up to 50),\nwhereas white (1, 1) emphasises smaller shapes, essentially none over 5")
+```
+
+A negative binomial with a smaller shape parameter will have a higher ratio of zero/smaller values
+
+```{r}
+shapedf |> ggplot(aes(x = x)) + 
+  geom_area(aes(y=y01001), color="transparent", fill = "green", alpha=0.3) +
+  geom_area(aes(y=y0101), color="transparent", fill = "yellow", alpha=0.5) +
+  scale_x_continuous(NULL) +
+  scale_y_continuous(NULL) +
+#  coord_cartesian(xlim = c(0, 50)) +
+  ggtitle(expression(brms~default~gamma(0.01*", "*0.01)~vs~gamma(0.1*", "*0.01)~shape~prior), 
+          subtitle = "The yellow (0.1, 0.1) allows a broader range of shapes,\nwhereas green (0.1, 0.01) puts more probability on smaller shapes")
+
+```
+
+
+```{r}
+M_prior_selection <- brm(data=d,
+                        family=zero_inflated_negbinomial,
+                        formula=bf(y ~ 1 + logADD + logDUP + logCOMPLEX,
+                                   zi ~ 1 + logADD),
+                        prior = c(prior(normal(0.5, 0.5), class = Intercept),
+                                  prior(normal(0, 0.25), class = b),
+                                  prior(normal(1, 0.25), class = Intercept, dpar=zi),
+                                  prior(normal(0, 0.25), class = b, dpar=zi),
+                                  prior(gamma(1, 0.25), class = shape)),
+                        #prior(normal(0, 0.25), class = b),
+                        #          prior(normal(0, 0.5), class = b, coef = Intercept),
+                        #          prior(normal(0.1, 0.5), class = Intercept, dpar=zi),
+                        #          prior(normal(0, 0.25), class = b, dpar=zi),
+                        #          prior(gamma(0.75, 1), class = shape)),
+                        sample_prior = "only",
+                        warmup=1000,
+                        iter=2000,
+                        chains=2,
+                        cores=2,
+                        backend="cmdstanr",
+                        save_pars = save_pars(all=T),
+                        adapt_delta=0.95)
+
+```
+
+
+
+Having the default prior on shape (0.01, 0.01) leads to very many divergent transitions.
+
+```{r}
+m <- M_prior_selection
+
+loo(m)
+```
+
+We have 11% bad Pareto values from our priors. 
+
+```{r}
+yrep_zinb <- posterior_predict(m)
+
+ppc_stat(y = d$y, yrep_zinb, stat = function(y) mean(y == 0))
+ppc_stat(y = d$y, yrep_zinb, stat = "max")
+
+```
+Our priors seem to be overestimating the zeros in our data. But at least they allow between 0.66 to 1.0 zeros --- which is to be expected --- we do expect more than half the changes to not introduce any new duplications.
+
+
+```{r}
+ppc_stat(y = d$y, yrep_zinb, stat = "max", binwidth=10) + xlim(0,200)
+
+```
+
+
+```{r}
+max(yrep_zinb)
+```
+
+Plot in different scale
+
+```{r}
+ppc_stat(y = d$y, yrep_zinb, stat = "max") + scale_x_continuous(limits = c(0,100))
+
+```
+
+Seem to be overestimating the zero-inflation here too
+
+### Scientific model
+
+Whilr it would be tempting to use the same scientific argument for our model as McElreath in the Oceanic tools example, we do have parameters where the impact of zero is not 
+Not using any log link for the $mu$, keeping the intercept 
+
+
+### Having too restrictive priors
+
+Specifying too restrictive priors will lead to the data not being allowed to tell its tale.
+The priors will reflect back in the posterior.
+
+This is an example where we restrict the betas very much, by setting sd to 0.01.
+
+```{r}
+d <- data.frame(y=introd, logADD=A, logDUP=D, logCOMPLEX=C)
+M_worse_priors <- brm(data=d,
+                        family=zero_inflated_negbinomial,
+                        formula=bf(y ~ 1 + logADD + logDUP + logCOMPLEX,
+                                   zi ~ 1),
+                        prior = c(prior(normal(0, 1), class = Intercept),
+                                  prior(normal(0, 0.01), class = b),
+                                  prior(normal(0, 0.4), class = Intercept, dpar=zi),
+                                  prior(gamma(0.1, 0.01), class = shape)),
+                        warmup=1000,
+                        iter=2000,
+                        chains=2,
+                        cores=2,
+                        backend="cmdstanr",
+                        save_pars = save_pars(all=T),
+                        adapt_delta=0.95)
+
+```
+
+```{r}
+m <- M_worse_priors
+
+loo(m)
+```
+
+There is only one bad Pareto k value.
+
+```{r}
+loo <- loo(m, moment_match=T, reloo=T)
+m <- add_criterion(m, "loo")
+```
+
+All Pareto k values are bad! Can we get more informed priors?
+```{r}
+yrep_zinb <- posterior_predict(m)
+
+ppc_stat(y = d$y, yrep_zinb, stat = function(y) mean(y == 0))
+ppc_stat(y = d$y, yrep_zinb, stat = "max")
+
+```
+
+The zero-intercept prior is OK, the observed value lies in the middle of the resulting distribution.
+However, the model seems to severely underestimate the mean (rate), as there are a strong bias towards max values around 30-40, relative to the observed ~180.
+
+```{r}
+max(yrep_zinb)
+```
+
+
+
+```{r}
+pp_check(m, type = "bars") #+ ylim(0, 40) + xlim(1, 40)
+```
+
+The conditional effects show three very flat betas for the three priors.
+
+```{r}
+plot(conditional_effects(m), ask = FALSE)
+
+```
+
+```{r}
+summary(m)
+```
+
+This model, likely has too restrictive priors. The data is not allowed to tell its tale...
+
+Plotting the data together with the model
+
+```{r}
+
+nd <- d |> select(logADD, logDUP) |> mutate(logCOMPLEX = seq(from=-2, to=4, length.out=350))
+
+f <- fitted(m, newdata=nd, probs=c(.055, .945)) |> data.frame() |> bind_cols(nd)
+f |> ggplot(aes(x=logCOMPLEX)) + geom_smooth(aes(y=Estimate, ymin=Q5.5, ymax=Q94.5), stat="identity", alpha=.25, size=.5) + 
+  geom_point(data=bind_cols(d, m$criteria$loo$diagnostics), aes(y=y, size = pareto_k), alpha=0.8)
+```
+
+
+### Recovering the model parameters (zi-poisson)
