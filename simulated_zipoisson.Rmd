@@ -34,11 +34,443 @@ untouched <- rbinom(N, 1, prob_untouched)
 
 # simulate issues introduced
 introd <- (1-untouched) * rpois(N, rate_introd)
+
+
 ```
+
+Produce some data that looks reasonably well like the one we have.
+
+```{r}
+eadd <- rexp(N, .75)
+```
+logarithm could be modeled like this...
+which means that add = exp(eadd)-1
+```{r}
+simplehist(eadd)
+```
+While the range of values are OK with the rate 0.7, there is too few values.
+THe real distribution has more spread out values between to 600-6000 range.
+But at least the number of zeros look OK. So some exponential family function should it be. But how do we find an alternative?
+
+```{r}
+min(exp(rexp(N, 0.75))-1)
+```
+
+seems reasonable to use this for , with 0.8 as parameter.
+NB is 
+
+```{r}
+draws <- exp(rexp(N, 0.8)-1)
+summary(draws)
+```
+
+```{r}
+simplehist(exp(rexp(N, .75))-1)
+```
+
+All parameters shouw a similar extremely right-skewed distribution
+```{r}
+ADD <- exp(rexp(N, .75))-1
+COMPLEX <- exp(rexp(N, .75))-1
+DUP <- exp(rexp(N, .75))-1
+
+```
+
+
+
+```{r}
+#ADD <- rlnorm(N, 1, 1)+1
+#COMPLEX <- rlnorm(N, 1.2, 0.5)+1
+#DUP <- rlnorm(N, -0.9, 1.1)+1
+
+```
+
+```{r}
+simplehist(ADD)
+```
+
+
+
+```{r}
+logADD <- log(ADD) #log(rlnorm(N, 1, 1)+1)
+logCOMPLEX <- log(COMPLEX) #log(rlnorm(N, 1.2, 0.5)+1)
+logDUP <- log(DUP) #log(rlnorm(N, -0.9, 1.1)+1)
+```
+
+```{r}
+simplehist(logADD)
+```
+
+
+Check the distribution of each of the generated data
+```{r}
+summary(log(rlnorm(500, -0.5, 1.1)+1))
+simplehist(rlnorm(500, -0.5, 1.1))
+```
+```{r}
+summary(log(rlnorm(500, 0.7, 1)+1))
+simplehist(log(rlnorm(500, 0.7, 1)+1))
+```
+
+
+```{r}
+teams <- rep(1:5, each=70)
+authors <- rbinom(N, teams*7, .4) + 1
+```
+
+```{r}
+simplehist(authors)
+```
+
+Invent some coefficients tied to our data.
+
+```{r}
+logLambda <- -1.5 + 0.9 * logADD + 0.7 * logCOMPLEX + 0.2 * logDUP
+data.frame(logLambda=logLambda) |> ggplot(aes(x=logLambda)) + geom_histogram(bins = 40)
+#simplehist(0.5 + 0.5 * logADD + 1.3 * logCOMPLEX + 0.93 * logDUP)
+```
+
+Check that the generated data produces reasonably well behaved outcomes
+
+```{r}
+simplehist(exp(logLambda))# - teams/5 - authors/10))
+```
+
+And also for the negative binomial (with the given size and mu parameters)
+
+```{r}
+mu <- exp(logLambda)#-teams/5-authors/10)
+size <- 5#*teams + authors
+simplehist(rnbinom(500, mu=mu, size=size))
+```
+
+Only keep some events - here, we keep 15%
+
+```{r}
+prob_untouched <- 0.75
+untouched <- rbinom(N, 1, prob_untouched)
+introd <- (1-untouched) * rnbinom(N, mu=mu, size=size)
+```
+
+This gives the following distribution of data.
+
+```{r}
+simplehist(introd)
+```
+
+#
++ (0 + author | team),
+
+Gives 
+
+
+
+```{r}
+library(brms)
+library(tidybayes)
+library(bayesplot)
+
+```
+```{r}
+
+```
+
+
+The 350 data points are not enough to recover the parameters stable enough. But 3500 data points work well. Can we find more intelligent priors?
+
+```{r}
+d <- data.frame(y=introd, logADD=logADD, logDUP=logDUP, logCOMPLEX=logCOMPLEX, team=as.factor(teams), author=as.factor(authors))
+M_recover_params <- brm(data=d,
+                        family=zero_inflated_negbinomial,
+                        formula=bf(y ~ 0 + Intercept + logADD + logDUP + logCOMPLEX ,#+ (0 + author | team),
+                                   zi ~ 1),
+                        prior = c(prior(normal(-2, 1), coef = Intercept),
+                                  prior(normal(0, 0.25), class = b),
+                                  prior(normal(1, 0.25), class = Intercept, dpar=zi),
+#                                  prior(lkj(2), class = cor),
+#                                  prior(weibull(2, 1), class = sd),
+                                  prior(gamma(0.1, 0.01), class = shape)),
+                        warmup=1000,
+                        iter=2000,
+                        chains=2,
+                        cores=2,
+                        backend="cmdstanr",
+                        save_pars = save_pars(all=T),
+                        adapt_delta=0.95)
+```
+
+```{r}
+get_prior(data=d,
+                        family=zero_inflated_negbinomial,
+                        formula=bf(y ~ 0 + Intercept + logADD + logDUP + logCOMPLEX ,#+ (0 + author | team),
+                                   zi ~ 1))
+```
+
+```{r}
+M_recover_params_autocentered <- brm(data=d,
+                        family=zero_inflated_negbinomial,
+                        formula=bf(y ~ 1 + logADD + logDUP + logCOMPLEX ,#+ (0 + author | team),
+                                   zi ~ 1),
+                        prior = c(prior(normal(-2, 1), class = Intercept),
+                                  prior(normal(0, 0.25), class = b),
+                                  prior(normal(1, 0.25), class = Intercept, dpar=zi),
+#                                  prior(lkj(2), class = cor),
+#                                  prior(weibull(2, 1), class = sd),
+                                  prior(gamma(0.1, 0.01), class = shape)),
+                        warmup=1000,
+                        iter=2000,
+                        chains=2,
+                        cores=2,
+                        backend="cmdstanr",
+                        save_pars = save_pars(all=T),
+                        adapt_delta=0.95)
+
+```
+
+
+
+```{r}
+m <- M_recover_params
+stopifnot(rhat(m) < 1.01)
+stopifnot(neff_ratio(m) > 0.2)
+mcmc_trace(m) # ok
+loo(m) 
+```
+
+```{r}
+rhat(m) |> mcmc_rhat()
+neff_ratio(m) |> mcmc_neff() # + scale_x_continuous(limits=c(0, 0.5))
+```
+
+```{r}
+loo(m)
+```
+
+```{r}
+loo_recover <- loo(m, moment_match = T, reloo = T)
+
+```
+
+```{r}
+plot(loo_recover)
+```
+```{r}
+loo_recover
+```
+
+```{r}
+yrep_zinb <- posterior_predict(m)
+
+ppc_stat(y = d$y, yrep_zinb, stat = function(y) mean(y == 0))
+ppc_stat(y = d$y, yrep_zinb, stat = "max")  + scale_x_continuous(limits=c(0,2000))
+
+```
+
+
+
+```{r}
+max(yrep_zinb)
+```
+
+OK, so my priors were quite OK after all...
+
+
+```{r}
+pp_check(m, type = "bars") #+ ylim(0, 1400) + xlim(1, 16)
+```
+
+```{r}
+plot(conditional_effects(m), ask = FALSE)
+
+```
+So, 350 observations were not enough to arrive at the correct conclusions.
+Better priors warranted? Because it works with 3500 observations - indicates that with more data, the priors will be swamped.
+
+```{r}
+sum_1 <- summary(m)
+```
+
+```{r}
+sum_1
+```
+
+```{r}
+inv_logit(c(0.8, 1.11, 1.41))
+```
+
+```{r}
+mcmc_areas(m, regex_pars = c("^b_", "^b_zi"))
+
+```
+
+
+### Prior selection
+
+```{r}
+get_prior(data=d,
+                        family=zero_inflated_negbinomial,
+                        formula=bf(y ~ 1 + logADD + logDUP + logCOMPLEX ,#+ (0 + author | team),
+                                   zi ~ 1))
+```
+
+```{r}
+M_horrible_prior_selection <- brm(data=d,
+                        family=zero_inflated_negbinomial,
+                        formula=bf(y ~ 1 + logADD + logDUP + logCOMPLEX ,#+ (0 + author | team),
+                                   zi ~ 1),
+                        prior = c(prior(normal(0, 0.1), class = Intercept),
+                                  prior(normal(0, 0.01), class = b),
+                                  prior(normal(0, 0.6), class = Intercept, dpar=zi),
+#                                  prior(lkj(2), class = cor),
+#                                  prior(weibull(2, 1), class = sd),
+                                  prior(gamma(0.1, 1), class = shape)),
+                        sample_prior = "only",
+                        warmup=1000,
+                        iter=2000,
+                        chains=2,
+                        cores=2,
+                        backend="cmdstanr",
+                        save_pars = save_pars(all=T),
+                        adapt_delta=0.95)
+```
+
+
+With these priors, we can get the true parameters with only 350 samples! (gamma(0.1, 0.1))
+With default shape priors (gamma(0.01, 0.01)), we get lot of 10% Pareto values > 0.7 and 10% > 1.0. This gamma(0.1,0.1) is better
+```{r}
+M_prior_selection <- brm(data=d,
+                        family=zero_inflated_negbinomial,
+                        formula=bf(y ~ 0 + Intercept + logADD + logDUP + logCOMPLEX ,#+ (0 + author | team),
+                                   zi ~ 1),
+                        prior = c(#prior(normal(-2, 1), class = Intercept),
+                                  prior(normal(0, 0.25), class = b),
+                                  prior(normal(1, 0.25), class = Intercept, dpar=zi),
+#                                  prior(lkj(2), class = cor),
+#                                  prior(weibull(2, 1), class = sd),
+                                  prior(gamma(0.1, 0.1), class = shape)),
+                        sample_prior = "only",
+                        warmup=1000,
+                        iter=2000,
+                        chains=2,
+                        cores=2,
+                        backend="cmdstanr",
+                        save_pars = save_pars(all=T),
+                        adapt_delta=0.95)
+
+```
+
+Having the default prior on shape (0.01, 0.01) leads to very many divergent transitions.
+
+```{r}
+m <- M_prior_selection
+
+loo(m)
+```
+
+All Pareto k values are bad! Can we get more informed priors?
+```{r}
+yrep_zinb <- posterior_predict(m)
+
+ppc_stat(y = d$y, yrep_zinb, stat = function(y) mean(y == 0))
+ppc_stat(y = d$y, yrep_zinb, stat = "max")
+
+```
+
+```{r}
+inv_logit(1.5)
+```
+
+We have some wild priors. 305k issues...
+And seem to be overestimating zero-inflation parts... But at least down towards 0.6-07 percentage is plausible... Probably realistic to say that half the commits should not introduce any issues
+
+```{r}
+max(yrep_zinb)
+```
+
+Plot in different scale
+
+```{r}
+ppc_stat(y = d$y, yrep_zinb, stat = "max") + scale_x_continuous(limits = c(0,400))
+
+```
+
+Seem to be overestimating the zero-inflation here too
+
+
+### Retrofitting with new priors
+
+Dangerous priors! All data will be put on the intercept, even with - but that may be because I had sd 0.01 on the betas...
+
+```{r}
+d <- data.frame(y=introd, logADD=logADD, logDUP=logDUP, logCOMPLEX=logCOMPLEX, team=as.factor(teams), author=as.factor(authors))
+M_worse_priors <- brm(data=d,
+                        family=zero_inflated_negbinomial,
+                        formula=bf(y ~ 1 + logADD + logDUP + logCOMPLEX ,#+ (0 + author | team),
+                                   zi ~ 1),
+                        prior = c(prior(normal(0, 1), class = Intercept),
+                                  prior(normal(0, 0.4), class = b),
+                                  prior(normal(0, 0.4), class = Intercept, dpar=zi),
+#                                  prior(lkj(2), class = cor),
+#                                  prior(weibull(2, 1), class = sd),
+                                  prior(gamma(0.1, 0.01), class = shape)),
+                        warmup=1000,
+                        iter=2000,
+                        chains=2,
+                        cores=2,
+                        backend="cmdstanr",
+                        save_pars = save_pars(all=T),
+                        adapt_delta=0.95)
+
+```
+
+```{r}
+m <- M_worse_priors
+
+loo(m)
+```
+
+All Pareto k values are bad! Can we get more informed priors?
+```{r}
+yrep_zinb <- posterior_predict(m)
+
+ppc_stat(y = d$y, yrep_zinb, stat = function(y) mean(y == 0))
+ppc_stat(y = d$y, yrep_zinb, stat = "max")
+
+```
+
+We clearly have too strict prior on the zi-intercept
+
+
+```{r}
+max(yrep_zinb)
+```
+
+
+
+```{r}
+pp_check(m, type = "bars") #+ ylim(0, 40) + xlim(1, 40)
+```
+
+As stated, we overestimate the zero-inflation
+
+```{r}
+plot(conditional_effects(m), ask = FALSE)
+
+```
+
+```{r}
+summary(m)
+```
+
+This model, likely has too restrictive priors. The data is not allowed to tell its tale...
+
 
 ```{r}
 simplehist(introd, xlab="issues introduced", lwd=4)
 ```
+
+
+
 
 
 ### brms model (zi NegBin)
