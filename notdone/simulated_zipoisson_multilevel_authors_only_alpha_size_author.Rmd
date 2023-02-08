@@ -1,0 +1,384 @@
+---
+title: "Zero-Inflated Poisson - Multilevel model with authors"
+author: "Anders Sundelin"
+date: "2022-10-25"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(rethinking)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+```
+
+## Refresher from chapter 13.3 (more than one type of cluster)
+
+Not active by default, evaluate manually or change eval value.
+
+```{r, eval=FALSE}
+
+data("chimpanzees")
+d <- chimpanzees
+d$treatment <- 1 + d$prosoc_left + 2 * d$condition
+
+dat_list <- list(
+  pulled_left = d$pulled_left,
+  actor = d$actor,
+  block_id = d$block,
+  treatment = as.integer(d$treatment)
+)
+set.seed(13)
+
+m13.4 <- ulam(
+  alist(
+    pulled_left ~ dbinom(1, p),
+    logit(p) <- a[actor] + g[block_id] + b[treatment],
+    b[treatment] ~ dnorm(0, 0.5),
+    # adaptive priors
+    a[actor] ~ dnorm(a_bar, sigma_a),
+    g[block_id] ~ dnorm(0, sigma_g),
+    # hyper-priors
+    a_bar ~ dnorm(0, 1.5),
+    sigma_a ~ dexp(1),
+    sigma_g ~ dexp(1)
+  ), data = dat_list, chains=4, cores=4, log_lik = TRUE
+)
+
+precis(m13.4, depth=2)
+plot(precis(m13.4, depth=2))
+```
+
+
+## Multilevel Bayesian Model With Authors and Reviewers
+
+In this model, we assume author and reviewer impact to be constant over time. The same goes for all parameters in the Generalized Linear Model.
+
+```{r init_sim}
+N <- 52  # weeks/commits of sampling
+set.seed(700716)
+
+a_bar <- 3.14
+sigma_a <- 0.5
+b_bar <- 1.2
+sigma_b <- 0.3
+nfiles <- 5
+nauthors <- 7
+
+bauthor_bar <- 0.33
+sigma_bauthor <- 0.3
+
+breviewer_bar <- 0.135
+sigma_breviewer <- 0.1
+
+# probability of a event not happening
+# A is likely to be touched, but B is not, C and D also vary a bit...
+prob_untouched <- c(0.2, 0.6, 0.1, 0.4, 0.23)
+# simulate with more files, just pick uniformly random numbers as probabilities
+#nfiles <- 40
+#prob_untouched <- runif(nfiles, min=0.2, max=0.5)
+
+a_file <- rnorm(nfiles, mean=a_bar, sd=sigma_a) # value for each file, drawn from the general mean/sd
+b_file <- rnorm(nfiles, mean=b_bar, sd=sigma_b) # ditto for each slope, unique values for each slope
+b_author <- rnorm(nauthors, mean=bauthor_bar, sd=sigma_bauthor)
+b_reviewer <- rnorm(nauthors, mean=breviewer_bar, sd=sigma_breviewer)
+
+dsim <- data.frame(file=1:nfiles, p_untouched=prob_untouched, true_a=a_file, true_b=b_file)
+
+# each file is measured each observation
+observations <- N*nfiles
+
+# on average, we add 10 rows per week
+change_size <- rnorm(observations, 10, 5)  # assume all files change with similar frequency
+SZ <- scale(change_size)
+
+# assume one author authors each file, at random
+# So the AUTHORS array becomes just a random sample of observations between 1 and 7
+# assume each author has a constant impact on each file, regardless of file.
+author_impact <- rnorm(nauthors, 0.5, 0.2)
+AUTHORS <- sample(1:nauthors, observations, replace=TRUE)
+# and each week, the impact of the author is simulated (in real life, measured) like this
+author_impact <- sapply(1:observations, function(i) author_impact[AUTHORS[i]])
+# standard scaler, (x-mean(x))/sd(x), is OK to use, because 0 has no real meaning for the authors - each file has one and only one author
+AI <- scale(author_impact)
+
+# The author part of the lograte coefficient for each observation
+author_coefficient <- sapply(1:observations, function(i) b_author[AUTHORS[i]] * AI[i])
+
+# probability of a particular reviewer contributing to an observation
+prob_review_impact <- c(0.100, 0.248, 0.540, 0.140, 0.040, 0.12, 0.060)
+REVIEW_IMPACT <- sapply(1:length(prob_review_impact), function(i) rbinom(observations, 10, prob_review_impact[i]))
+# now we have a matrix of values between 0 and 10 where we have indicated which reviewer that contributed, and how much (metric could for example be # of non-trivial comments)
+# because 0 is a "special metric", we cannot use standard scaling methods (it would destroy the property that 0 indicates "no review"). We scale by normalizing the stddev to 1 by dividing with the calculated stddev.
+RI <- REVIEW_IMPACT / sd(REVIEW_IMPACT)
+# Normal matrix multiplication now works to figure out how much the reviewers contributed, because we kept the '0' value for the cases when the reviewer did not actually reviewed anything.
+review_impact <- RI %*% b_reviewer
+# this leaves us with a vector of `observations` elements.
+
+# in this simple example, assume we observe one file in each observation. Randomize which one by simple sampling.
+file_observation <- sample(1:nfiles, observations, replace = TRUE)
+
+# The log of the rate is a linear model - rates are always positive
+# Thus, the rate is the exponentiation of the linear model
+# Calculate the log of the rate by iterating over each observation - make sure to keep track of observation metrics and file metrics
+log_rate_introd <- sapply(1:length(file_observation), function(i) dsim$true_a[file_observation[i]] + dsim$true_b[file_observation[i]] * SZ[i] + author_coefficient[i]  )#+ review_impact[i])
+# now we have 140 observations in one long vector
+
+# roll a dice, figuring out which observations that are untouched or not, depending on the probability that the file is untouched (the 'file_observation' array contains which file that was affected).
+untouched <- sapply(file_observation, function(i) rbinom(1, 1, prob_untouched[i]))
+# untouched is also 'observations` items long
+
+# simulate issues introduced - here is the actual zero-inflated Poisson process
+introd <- sapply(1:length(file_observation), function (i) (1-untouched[i]) * rpois(1, exp(log_rate_introd[i])))
+# another vector of `observations` items
+
+# assemble the data frame, including the whole reviewer matrix
+df <- data.frame(introd=introd, file=file_observation, size=SZ, author=AUTHORS, author_impact=AI, reviewer=RI)
+# convert the data frame into `long format`, putting the reviewers and their impact into two columns instead of one column per reviewer.
+df_longer <- df %>% pivot_longer(cols = starts_with("reviewer."), names_to="reviewer", values_to="reviewer_skill", names_prefix = "reviewer.") #%>% filter(reviewer_skill > 0)
+# compare with or without filtering out participating reviewers, e.g. only considering those reviewers that actually participated in the review
+# for comparison with the full matrix later
+df_longer_filtered <- df_longer %>% filter(reviewer_skill > 0)
+# it seems like filtering out the participating reviewers leads to worse estimates (perhaps due to less frequently occurring data - files that only occur seldom will occur less seldom...)
+```
+
+```{r}
+simplehist(df %>% filter(file == 1) %>% select(introd), xlab="issues introduced in file 1", lwd=4)
+```
+```{r}
+df %>% filter(file==4) 
+```
+
+
+```{r}
+simplehist(df %>% filter(file == 2) %>% select(introd), xlab="issues introduced in file 2", lwd=4)
+
+```
+
+## Prior selection
+
+Based on reasoning and the plots above, we know will mostly find 20-30 issues per file, with some extreme values also possible (hundreds).
+
+The log link puts half of the real numbers (negative numbers) between 0 and 1 on the outcome scale.
+
+This means that a conventional flat prior will yield extreme results (0 or very many issues).
+
+```{r}
+curve(dlnorm(x, 3, 0.5), from=0, to=100, n=200)
+```
+For the alpha, a norm(3, 0.5) prior seems to make sense.
+
+The size parameter is normalized, so we know that it has 0 as a mean, and 1 as a stddev. This means that we should plot priors in a reasonable range, say [-4,4]. We will also consider the alpha prior.
+
+```{r}
+N <- 100
+a <- rnorm(N, 3, 0.5)
+b <- rnorm(N, 0, 0.2)
+plot(NULL, xlim=c(-4,4), ylim=c(0,100))
+for (i in 1:N)
+  curve(exp(a[i] + b[i] * x), add=TRUE, col=grau())
+```
+
+The author impact is normalized by dividing with stddev - again converting the unit of measurement to stddev, regardless of what the mean value lies, the scale is unlikely to deviate too much from [-4,4].
+
+We plot the same prior as for b_size:
+
+```{r}
+N <- 100
+a <- rnorm(N, 3, 0.5)
+b <- rnorm(N, 0, 0.2)
+b_auth <- rnorm(N, 0, 0.2)
+plot(NULL, xlim=c(-4,4), ylim=c(0,100))
+for (i in 1:N)
+  curve(exp(a[i] + b[i] * x + b_auth[i] * x), add=TRUE, col=grau())
+```
+
+And finally the same prior for the reviwers (as they also use the stddev unit of measurement):
+
+```{r}
+N <- 100
+a <- rnorm(N, 3, 0.5)
+b <- rnorm(N, 0, 0.2)
+b_auth <- rnorm(N, 0, 0.2)
+b_review <- rnorm(N, 0, 0.2)
+plot(NULL, xlim=c(-4,4), ylim=c(0,100))
+for (i in 1:N)
+  curve(exp(a[i] + b[i] * x + b_auth[i] * x + b_review[i] * x), add=TRUE, col=grau())
+```
+
+While many lines show steep relationships, at least now most of the priors are flat - we could even consider narrowing down the stddev of the betas to 0.1, to force even flatter priors.
+```{r}
+N <- 100
+a <- rnorm(N, 3, 0.5)
+b <- rnorm(N, 0, 0.1)
+b_auth <- rnorm(N, 0, 0.1)
+b_review <- rnorm(N, 0, 0.1)
+plot(NULL, xlim=c(-4,4), ylim=c(0,100))
+for (i in 1:N)
+  curve(exp(a[i] + b[i] * x + b_auth[i] * x + b_review[i] * x), add=TRUE, col=grau())
+```
+
+
+### Recovering the model parameters
+
+```{r}
+d <- list(y=df_longer$introd, file=df_longer$file, size=df_longer$size, author=df_longer$author, author_impact=df_longer$author_impact, reviewer=as.integer(df_longer$reviewer), reviewer_skill=df_longer$reviewer_skill)
+d <- list(y=df_longer$introd, file=df_longer$file, size=df_longer$size, author=df_longer$author, author_impact=df_longer$author_impact)#, reviewer=as.integer(df_longer$reviewer), reviewer_skill=df_longer$reviewer_skill)
+
+d_filtered <- list(y=df_longer_filtered$introd, file=df_longer_filtered$file, size=df_longer_filtered$size, author=df_longer_filtered$author, author_impact=df_longer_filtered$author_impact, reviewer=as.integer(df_longer_filtered$reviewer), reviewer_skill=df_longer_filtered$reviewer_skill)
+
+issue_model <- ulam(
+  alist(
+    y ~ dzipois(p, lambda),
+    logit(p) <- ap[file], # assume simplest possible model
+    log(lambda) <- al[file] + bsize[file] * size + bauth[author] * author_impact ,#+ breview[reviewer] * reviewer_skill,
+    ap[file] ~ dnorm(0, 1.5), # could of course also pull this from the model, if we generate it from a common probability above
+    al[file] ~ dnorm(a_bar, sigma_a),
+    bsize[file] ~ dnorm(b_bar, sigma_b),
+    bauth[author] ~ dnorm(bauth_bar, sigma_bauth),
+#    breview[reviewer] ~ dnorm(breview_bar, sigma_breview),
+    a_bar ~ dnorm(3, 0.5),
+    sigma_a ~ dexp(1),
+    b_bar ~ dnorm(0, 0.2),
+    sigma_b ~ dexp(1),
+    bauth_bar ~ dnorm(0, 0.2),
+    sigma_bauth ~ dexp(1) #,
+#    breview_bar ~ dnorm(0, 0.2),
+#    sigma_breview ~ dexp(1)
+  ), data=d, chains=4, cores = 4)
+```
+
+```{r}
+precis(issue_model, depth=2)
+```
+
+```{r}
+plot(issue_model, depth=2)
+```
+
+
+It is extremely important to know how you slice the matrices. Forgetting a comma here and there will completely screw your model...
+```{r}
+post <- extract.samples(issue_model)
+max(sapply(1:nfiles, function(i) abs(mean(inv_logit(post$ap[,i])) - dsim$p_untouched[i])))
+```
+Derived probabilities of changing (to be compared with the real values)
+```{r}
+prob_untouched
+sapply(1:nfiles, function(i) mean(inv_logit(post$ap[,i])))
+```
+
+Derived intercepts (to be compared with the real values)
+```{r}
+a_file
+sapply(1:nfiles, function(i) mean(post$al[,i]))
+```
+```{r}
+max(sapply(1:nfiles, function(i) abs(mean(post$al[,i]) - dsim$true_a[i])))
+```
+With a prior of norm(3, 0.5), our model is somewhat successful in retrieving the parameters. But it seems to consistently overestimate the intercept, relative to the correct value.
+
+
+Derived file slopes (to be compared with the real values)
+```{r}
+b_file
+sapply(1:nfiles, function(i) mean(post$bsize[,i]))
+```
+
+
+```{r}
+max(sapply(1:nfiles, function(i) abs(mean(post$bsize[,i]) - dsim$true_b[i])))
+```
+Derived author slopes (to be compared with the real values)
+```{r}
+b_author
+sapply(1:nauthors, function(i) mean(post$bauth[,i]))
+```
+
+
+```{r}
+max(sapply(1:nauthors, function(i) abs(mean(post$bauth[,i]) - b_author[i])))
+```
+Large errors
+
+```{r}
+b_reviewer
+sapply(1:nauthors, function(i) mean(post$breview[,i]))
+```
+
+
+```{r}
+max(sapply(1:nauthors, function(i) abs(mean(post$breview[,i]) - b_reviewer[i])))
+```
+
+Summary findings:
+
+a_bar (intercept) and sigma shows large deviations - the a_bar does not even fall under the 89% CI.
+
+```{r}
+c (a_bar, mean(post$a_bar), PI(post$a_bar))
+c (sigma_a, mean(post$sigma_a), PI(post$sigma_a))
+```
+
+b_bar (file slope) and sigma
+
+```{r}
+c(b_bar, mean(post$b_bar), PI(post$b_bar))
+c(sigma_b, mean(post$sigma_b), PI(post$sigma_b))
+```
+
+Note that we only had four files to sample from - this is likely why the model is so unsure about the sigma_b
+
+b_author_bar and sigma
+
+```{r}
+c(bauthor_bar, mean(post$bauth_bar), PI(post$bauth_bar))
+c(sigma_bauthor, mean(post$sigma_bauth), PI(post$sigma_bauth))
+```
+
+Likewise, we only had seven authors, which I guess mean that the model was way off here too (even more so for the files) - check without filtering
+
+b_reviewer_bar
+
+```{r}
+c(breviewer_bar, mean(post$breview_bar), PI(post$breview_bar))
+c(sigma_breviewer, mean(post$sigma_breview), PI(post$sigma_breview))
+```
+
+```{r}
+d_filtered <- list(y=df_longer_filtered$introd, file=df_longer_filtered$file, size=df_longer_filtered$size, author=df_longer_filtered$author, author_impact=df_longer_filtered$author_impact, reviewer=as.integer(df_longer_filtered$reviewer), reviewer_skill=df_longer_filtered$reviewer_skill)
+
+issue_model_filtered <- ulam(
+  alist(
+    y ~ dzipois(p, lambda),
+    logit(p) <- ap[file], # assume simplest possible model
+    log(lambda) <- al[file] + bsize[file] * size + bauth[author] * author_impact + breview[reviewer] * reviewer_skill,
+    ap[file] ~ dnorm(0, 1.5), # could of course also pull this from the model, if we generate it from a common probability above
+    al[file] ~ dnorm(a_bar, sigma_a),
+    bsize[file] ~ dnorm(b_bar, sigma_b),
+    bauth[author] ~ dnorm(bauth_bar, sigma_bauth),
+    breview[reviewer] ~ dnorm(breview_bar, sigma_breview),
+    a_bar ~ dnorm(2.5, 0.7),
+    sigma_a ~ dexp(1),
+    b_bar ~ dnorm(0, 0.2),
+    sigma_b ~ dexp(1),
+    bauth_bar ~ dnorm(0, 0.2),
+    sigma_bauth ~ dexp(1),
+    breview_bar ~ dnorm(0, 0.2),
+    sigma_breview ~ dexp(1)
+  ), data=d_filtered, chains=4, cores = 4)
+precis(issue_model_filtered, depth=2)
+
+```
+
+
+```{r}
+precis(issue_model)
+precis(issue_model_filtered)
+```
+
+Question: 
+
+* Does it really matter whether I remove reviwers that do not review? The reviewers that do review of course take part in the model, and the rest of the parameters are the same for all?
+A: It seems to matter - though insstructor seems to indicate that for HMC, it should not matter if the matrix is unbalanced, especially if we employ partial pooling.
