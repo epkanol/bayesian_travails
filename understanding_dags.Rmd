@@ -39,7 +39,7 @@ drawdag(introd.dag)
 
 Explanation of the variables in the DAG:
 
-* INTROD - this is the thing we are trying to model/predict. It is the number of *introduced duplicates* in a particular file, in a particular change (commit). Zero or larger (absolute upper bound is the number of lines in the file - due to the way Sonar calculates duplicates)
+* INTROD - this is the thing we are trying to model/predict. It is the number of *introduced duplicates* in a particular file, in a particular change (commit). Zero or larger (absolute upper bound is on the order of the total number of lines in all files - due to the way Sonar calculates duplicates, though this assumes duplicates are counted line per line - in practice the tool will cluster identical lines or modules)
 * ADDED  - Number of added lines in the particular file, in the particular commit, as measured via Git (--numstat)
 * REASON - The reason for changing the file - factor levels include "Added functionality", "TR fix", "Refactoring/spontaneous improvement".
 * AUTHOR - The author that started the change (Git Author).
@@ -123,8 +123,28 @@ drawdag(introd.dag.2)
 adjustmentSets(introd.dag.2, exposure = c("TEAM", "COMPLEX", "ISSUES", "ADDED", "REASON"), outcome = "INTROD")
 ```
 
-This would indicate that if I want to predict INTROD based on the TEAM, COMPLEX, ISSUES, ADDED and REASON variables, I also need to include FILE in my model. But not REPO or AUTHOR.
+## Criticism of the above model
 
+Important to note that arrows in a DAG should refer to _causal_ relationships. A _causes_ B, not "A is part of B", or "A is an attribute of B".
+Suggestion from mentor is to make a matrix (spreadsheet) with motivations, including arrows and direction for all plausible combinations.
+
+But be sure differentiate between causal effects and correlations or hierarchical information.
+
+With that said, we will revise the above DAGs. 
+AUTHOR has an effect on ADDED, but FILE does not have a causal relationship with REPO (though given that I know what file is affected, the repo is also given - but this is a correlation, not _causation_).
+
+Suggestion from mentor is to model the relationships in a matrix form, write down all possible combinations, and also indicate the direction of the arrows.
+
+In particular, given a DAG and an analysis, one may also perform sensitivity analysis (akin to physics' pertubation analysis), that is, reasoning about how many or how strong unobserved counfounds that would be needed to erase a particular effect. https://evalf21.classes.andrewheiss.com/example/confounding-sensitivity/
+
+
+* AUTHOR (or, COMMITTER, as this is the person doing the final merge) would have a causal effect on ADDED.
+* FILE would not have a causal effect on REPO, but either (or both) would have a causal effect on AUTHOR or COMMITTER. 
+  People are more or less famililar with the functions, tests, structure of particular FILEs or REPOs (this is the ownership part).
+* A FILE will _have_ an existing complexity (COMPLEX), but a particular FILE would not _cause_ that same COMPLEX. It is still plausible that COMPLEX would affect the AUTHOR (and/or TEAM) via causation (harder to make changes to complex files).
+* In itself, neither FILE nor REPO would affect INTROD. The unfamiliarity would come through either AUTHOR/COMMITTER/TEAM.
+
+This would indicate that if I want to predict INTROD based on the TEAM, COMPLEX, ISSUES, ADDED and REASON variables, I also need to include FILE in my model. But not REPO or AUTHOR.
 
 ```{r}
 adjustmentSets(introd.dag.2, exposure = c("TEAM", "COMPLEX", "ISSUES", "ADDED", "REASON", "REPO"), outcome = "INTROD")
@@ -145,7 +165,226 @@ impliedConditionalIndependencies(introd.dag.2)
 ```
 
 
-# Questions
+```{r}
+introd.dag.3 <- dagitty("dag {
+                      AUTHOR [exposure];
+                      TEAM [exposure];
+                      INTROD [outcome];
+                      AUTHOR -> ADDED;
+                      AUTHOR -> REMOVED;
+                      TEAM -> AUTHOR;
+                      TEAM -> ADDED;
+                      TEAM -> REMOVED;
+                      FILE -> AUTHOR;
+                      FILE -> TEAM;
+                      REPO -> AUTHOR;
+                      REPO -> TEAM;
+                      ISSUES -> AUTHOR;
+                      ISSUES -> TEAM;
+                      COMPLEX -> AUTHOR;
+                      COMPLEX -> TEAM;
+                      ADDED -> INTROD;
+                      REASON -> AUTHOR;
+                      REASON -> TEAM;
+                      REMOVED -> INTROD;
+                      }")
+#coordinates(introd.dag.2) <- list(x=c(COMPLEX=0, FILE=1, ISSUES=1, ADDED=-1, INTROD=1, REPO=2, REASON=-1, AUTHOR=2, TEAM=2),
+#                                y=c(COMPLEX=0, FILE=0, ISSUES=1, ADDED=1 , INTROD=2, REPO=3, REASON=3 , AUTHOR=0, TEAM=2))
 
-* What is the scientific way of reasoning and choosing between these models? Depending on which model I believe in, more or less variables should be added to the linear regression model.
-* My first attempt was to model AUTHORs as interacting directly with INTROD. But in reality, all their interactions are through FILEs. Does that mean that the causal arrow has to go through FILE?
+drawdag(introd.dag.3)
+
+```
+
+```{r}
+impliedConditionalIndependencies(introd.dag.3)
+```
+
+```{r}
+adjustmentSets(introd.dag.3, exposure = c("AUTHOR", "TEAM", "COMPLEX", "ADDED", "ISSUES", "REPO"), outcome = "INTROD")
+```
+
+```{r}
+adjustmentSets(introd.dag.3, exposure = c("AUTHOR"), outcome = "INTROD")
+```
+
+So, this tells us that if we want to examine the total way that TEAM and AUTHOR influences INTROD, we should also include REASON into our model.
+This is becuase of the backdoor path through REMOVED. We assume that REASON will have an impact at least through the removal of files.
+
+The model can be more graphically explored on http://www.dagitty.net/
+This also includes coloring, and using node types, making the DAG a wee bit more understandable.
+
+Would AUTHOR have *any* effect on INTROD except through ADDED or REMOVED? I think not? Likewise for TEAM... They might influence Author (committer, really).
+
+# Only action through added/removed lines
+
+We could plausibly argue that the only action an AUTHOR or a TEAM has on the number of issues is through the number of ADDED or REMOVED lines. These are, after all, the sole change that the AUTHOR (or other users) have on the file in question.
+
+Does it change any inference?
+
+```{r}
+introd.dag.4 <- dagitty("dag {
+                      AUTHOR [exposure];
+                      TEAM [exposure];
+                      INTROD [outcome];
+                      AUTHOR -> ADDED;
+                      AUTHOR -> REMOVED;
+                      TEAM -> AUTHOR;
+                      FILE -> AUTHOR;
+                      FILE -> TEAM;
+                      REPO -> AUTHOR;
+                      REPO -> TEAM;
+                      ISSUES -> AUTHOR;
+                      ISSUES -> TEAM;
+                      COMPLEX -> AUTHOR;
+                      COMPLEX -> TEAM;
+                      ADDED -> INTROD;
+                      REASON -> AUTHOR;
+                      REASON -> REMOVED;
+                      REMOVED -> INTROD;
+                      }")
+#coordinates(introd.dag.4) <- list(x=c(COMPLEX=0, FILE=1, ISSUES=1, ADDED=-1, INTROD=1, REPO=2, REASON=-1, AUTHOR=2, TEAM=2),
+#                                y=c(COMPLEX=0, FILE=0, ISSUES=1, ADDED=1 , INTROD=2, REPO=3, REASON=3 , AUTHOR=0, TEAM=2))
+
+drawdag(introd.dag.4)
+```
+
+```{r}
+adjustmentSets(introd.dag.4, exposure = c("TEAM", "AUTHOR"), outcome="INTROD")
+```
+
+```{r}
+adjustmentSets(introd.dag.4, exposure = c("TEAM", "AUTHOR", "COMPLEX", "ISSUES", "REPO"), outcome="INTROD")
+```
+
+```{r}
+impliedConditionalIndependencies(introd.dag.4)
+```
+
+We could add a COMMIT node, to indicate that both AUTHOR and TEAM influence commits, and commits cause ADDED or REMOVED lines.
+
+```{r}
+introd.dag.5 <- dagitty("dag {
+                      AUTHOR [exposure];
+                      TEAM [exposure];
+                      INTROD [outcome];
+                      COMMIT -> ADDED;
+                      COMMIT -> REMOVED;
+                      AUTHOR -> COMMIT;
+                      TEAM -> COMMIT;
+                      FILE -> AUTHOR;
+                      FILE -> TEAM;
+                      REPO -> AUTHOR;
+                      REPO -> TEAM;
+                      ISSUES -> AUTHOR;
+                      ISSUES -> TEAM;
+                      COMPLEX -> AUTHOR;
+                      COMPLEX -> TEAM;
+                      ADDED -> INTROD;
+                      REASON -> AUTHOR;
+                      REASON -> REMOVED;
+                      REMOVED -> INTROD;
+                      }")
+#coordinates(introd.dag.4) <- list(x=c(COMPLEX=0, FILE=1, ISSUES=1, ADDED=-1, INTROD=1, REPO=2, REASON=-1, AUTHOR=2, TEAM=2),
+#                                y=c(COMPLEX=0, FILE=0, ISSUES=1, ADDED=1 , INTROD=2, REPO=3, REASON=3 , AUTHOR=0, TEAM=2))
+
+drawdag(introd.dag.5)
+
+```
+
+```{r}
+adjustmentSets(introd.dag.5, exposure = c("AUTHOR", "TEAM", "COMPLEX", "REPO", "ISSUES"), outcome = "INTROD")
+```
+
+Adding COMMIT as a descendent of AUTHOR (and before ADDED and REMOVED) does not change the number of nodes that should be added to our graph. We should still add REASON, to close the backdoor path through REMOVED (i.e. the possibility that refactorings may bias the results, related to removed files).
+
+Adding committer (as the person finally making the change to the repo). Committer and author MAY be the same person, but does not have to. Only the commiter influences the final result.
+
+```{r}
+introd.dag.6 <- dagitty("dag {
+                      AUTHOR [exposure];
+                      TEAM [exposure];
+                      COMMITTER [exposure]
+                      INTROD [outcome];
+                      COMMITTER -> ADDED;
+                      COMMITTER -> REMOVED;
+                      AUTHOR -> COMMITTER;
+                      TEAM -> COMMITTER;
+                      FILE -> AUTHOR;
+                      FILE -> TEAM;
+                      REPO -> AUTHOR;
+                      REPO -> TEAM;
+                      ISSUES -> AUTHOR;
+                      ISSUES -> TEAM;
+                      COMPLEX -> AUTHOR;
+                      COMPLEX -> TEAM;
+                      ADDED -> INTROD;
+                      REASON -> AUTHOR;
+                      REASON -> REMOVED;
+                      REMOVED -> INTROD;
+                      }")
+#coordinates(introd.dag.4) <- list(x=c(COMPLEX=0, FILE=1, ISSUES=1, ADDED=-1, INTROD=1, REPO=2, REASON=-1, AUTHOR=2, TEAM=2),
+#                                y=c(COMPLEX=0, FILE=0, ISSUES=1, ADDED=1 , INTROD=2, REPO=3, REASON=3 , AUTHOR=0, TEAM=2))
+
+drawdag(introd.dag.6)
+```
+
+```{r}
+adjustmentSets(introd.dag.6, exposure = c("AUTHOR", "TEAM", "COMMITTER", "COMPLEX", "REPO", "ISSUES"), outcome = "INTROD")
+
+```
+
+Having committer in the DAG does not change anything.
+
+```{r}
+adjustmentSets(introd.dag.6, exposure = c("TEAM", "COMMITTER", "COMPLEX", "REPO", "ISSUES"), outcome = "INTROD")
+```
+
+If we swap AUTHOR for COMMITTER (person doing the final change), we still have to include REASON in our model. But having AUTHOR there is not needed, if we are only striving to assess COMMITTER
+
+# Team-only model
+
+We could model the author&team as one entity, due to our sparse data. That effectively collapses the interaction and questions what is the causal relation between authors and teams (e.g. does the author cause the team's behaviour, or vice versa).
+
+```{r}
+introd.dag.7 <- dagitty("dag {
+                      TEAM [exposure];
+                      REPO [exposure]
+                      INTROD [outcome];
+                      TEAM -> ADDED;
+                      TEAM -> REMOVED;
+                      FILE -> TEAM;
+                      REPO -> TEAM;
+                      ISSUES -> TEAM;
+                      COMPLEX -> TEAM;
+                      ADDED -> INTROD;
+                      REASON -> TEAM;
+                      REMOVED -> INTROD;
+                      }")
+drawdag(introd.dag.7)
+```
+
+Adjustment set is empty, as all causal paths flow through TEAM. We could of couse still investigate the impact of ISSUES, REASON, COMPLEX.
+
+If we were to believe that some reasons (e.g. improvements or refactorings) would impact added lines, then that would become a collider and should be part of the model, even if it is not an outcome per se.
+
+```{r}
+introd.dag.8 <- dagitty("dag {
+                      TEAM [exposure];
+                      REPO [exposure]
+                      INTROD [outcome];
+                      TEAM -> ADDED;
+                      TEAM -> REMOVED;
+                      FILE -> TEAM;
+                      REPO -> TEAM;
+                      ISSUES -> TEAM;
+                      COMPLEX -> TEAM;
+                      ADDED -> INTROD;
+                      REASON -> TEAM;
+                      REASON -> ADDED;
+                      REMOVED -> INTROD;
+                      }")
+drawdag(introd.dag.8)
+```
+
+But it seems unlikely that REASON would impact ADDED lines without first going through ADDED or REMOVED lines (e.g. does the REASON has a different cause than going through the AUTHOR/TEAM process?)
+
