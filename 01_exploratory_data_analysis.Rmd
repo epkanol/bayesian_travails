@@ -1,0 +1,242 @@
+---
+title: "01 Exploratory Data Analysis"
+author: "Anders Sundelin"
+date: "2023-03-18"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(GGally)
+library(tidyr)
+library(dplyr)
+library(brms)
+library(tidybayes)
+library(bayesplot)
+library(patchwork)
+library(RColorBrewer)
+```
+
+## Exploring why certain teams introduce duplicates
+
+Models are cached in subdirectory, as they take considerable time to run. Expect multiple hours for the complete, multi-level model with all the data set.
+You might need to remove the cached models when changing some parameters (though formula or data changes are usually detected by brms).
+
+We move away from zero-based scaling, instead opting for scaling the logarithm of the severely right-skewed values (added, removed, complexity, duplicated lines).
+We are also heeding the advice of Gelman: https://statmodeling.stat.columbia.edu/2019/08/21/you-should-usually-log-transform-your-positive-data/
+This also means that the linear model will be based on the _magnitude_ of the change in parameter (e.g. 0, 1, 2.7, 7.3, 19.8 added lines/existing complexity). So each individual line will have marginally lower impact, but the scale of the parameter will still matter.
+
+A simple scientific model, where rates of change is taken from the population only, and the intercept varies per group becomes:
+
+$log(\lambda) = \beta_{0,i} + \beta_A A_i + \beta_C C_i + \beta_D D_i$
+
+where
+
+$A_i = \frac{ln(added_i+1) - \hat{\mu_{\alpha}}}{\hat{\sigma_{\alpha}}}$
+
+and
+$\hat{\mu_{\alpha}} = mean(ln(added+1))$
+$\hat{\sigma_{\alpha}} = stddev(ln(added+1))$
+
+$C_i = \frac{ln(complexity_i+1) - \hat{\mu_{\gamma}}}{\hat{\sigma_{\gamma}}}$
+
+and
+$\hat{\mu_{\gamma}} = mean(ln(complexity+1))$
+$\hat{\sigma_{\gamma}} = stddev(ln(complexity+1))$
+
+and
+
+$D_i = \frac{ln(dupblocks_i+1) - \hat{\mu_{\delta}}}{\hat{\sigma_{\delta}}}$
+
+and
+$\hat{\mu_{\delta}} = mean(ln(dupblocks+1))$
+$\hat{\sigma_{\delta}} = stddev(ln(dupblocks+1))$
+
+This corresponds to the following multiplicative model for $\lambda$ (also called $\mu$ in the negative binomial context):
+
+$\lambda_i = e^{\beta_{0,i}} (\frac{added_i+1}{e^\hat{\mu_\alpha}})^{\frac{\beta_A}{\hat{\sigma_\alpha}}} (\frac{complexity_i+1}{e^\hat{\mu_\gamma}})^{\frac{\beta_C}{\hat{\sigma_\gamma}}} (\frac{duplicates_i+1}{e^\hat{\mu_\delta}})^{\frac{\beta_D}{\hat{\sigma_\delta}}}$
+
+In this equation, $added$, $complexity$ and $duplicates$ are on their natural scale, starting at 0 and counting upwards.
+
+Depending on which parameters we include in the group-level effect, the exponent will change accordingly (hence the $i$ in $\beta_{0,i}$ for the model where only the intercept changes per team and repo).
+The other parameters, $\hat{\mu_\alpha}$ and $\hat{\sigma_\alpha}$, et al. are just normalizing constants, defined as the mean and standard deviation of the logarithm of the corresponding metric count.
+
+```{r ingest data}
+source("ingest_data.R")
+```
+
+# Exploratory Data Analysis
+
+Introduced duplicates in files, per repo.
+
+```{r}
+data |> filter(INTROD > 0) |> group_by(repo, INTROD) |> tally()
+```
+
+Most of the introduced duplicates are small (single-digits), but some are large, ranging into the hundreds for the IntTest repo.
+
+```{r}
+changesPerRepoAndTeam <- data |> group_by(repo, authorteam) |> summarise(fileschanged=n())
+zerosPerRepoAndTeam <- data |> filter(INTROD == 0) |> group_by(repo, authorteam) |> summarise(zeros=n())
+zeros_ratio <- merge(changesPerRepoAndTeam, zerosPerRepoAndTeam) |> mutate(introdRatio = 1-(zeros/fileschanged)) |> arrange(introdRatio)
+
+zeros_ratio |> ggplot(aes(x=authorteam, y=introdRatio, color=repo, size=fileschanged)) + geom_point() + ggtitle("Proportion of introduced duplicates in one file, per repo and team")
+```
+
+Viewing the added and removed lines, we see some correlation, and also quite a few "pure additions" and "pure removals" (along the x and y axes, respectively).
+
+```{r}
+data |> ggplot(aes(x=DUP)) + geom_histogram(bins=50)
+```
+
+```{r}
+data |> group_by(DUP) |> tally()
+```
+
+```{r}
+data |> group_by(COMPLEX) |> tally()
+```
+
+
+```{r}
+data |> group_by(repo) |> ggplot(aes(x=logADD, y=logDEL, color=authorteam)) + geom_point() + facet_wrap( ~ repo)
+```
+
+We see that, overall, there are more duplicates present in the IntTest and Jupiter repos (largest one). And there seems to be at least some indications of correlation with complexity (although there are also some duplicates in files where complexity is 0, i.e. the y axis).
+
+```{r}
+data |> group_by(repo) |> ggplot(aes(x=logCOMPLEX, y=logDUP)) + geom_point() + facet_wrap( ~ repo)
+```
+
+A more thorough pairs plot reveal that the parameters seem quite independet - at least no obvious correlations are present (though logCOMPLEX and logDUP are somewhat related, as seen above). Plot can be repeated per repo or per team, with the same conclusions.
+
+```{r}
+ggpairs(data |> select(logADD, logDEL, logCOMPLEX, logDUP))
+```
+
+```{r}
+repo_committerteam <- data |> group_by(repo, committerteam) |> summarize(q95=quantile(INTROD, 0.95),
+                                                                         q99=quantile(INTROD, 0.99),
+                                                                         max=max(INTROD),
+                                                                         files=n(),
+                                                                         mean_added=mean(ADD),
+                                                                         median_added=median(ADD),
+                                                                         mean_removed=mean(DEL),
+                                                                         median_removed=median(DEL)) |> mutate(team=committerteam)
+
+```
+
+
+```{r}
+repo_committerteam |> ggplot(aes(x=team, y=repo)) +
+    geom_tile(aes(fill=files)) +
+    geom_text(aes(label=round(files, 0)), color="white") +
+    xlab("team") + ylab("repo") +
+    ggtitle(paste("Observed number of changes to files by team and repo"))
+```
+
+Repositories are named and sized (though not to scale) after the seven neighboring planets, plus the "IntTest" repository, which contains integration tests developed in Java.
+
+We note that some teams have not changed files in some repostories, and that some teams have made very many, and some very few changes to some repositories.
+
+```{r}
+repo_committerteam |> ggplot(aes(x=team, y=repo)) +
+    geom_tile(aes(fill=mean_added)) +
+    geom_text(aes(label=round(mean_added, 0)), color="white") +
+    xlab("team") + ylab("repo") +
+    ggtitle(paste("Observed mean number of added lines to files by team and repo"))
+```
+```{r}
+repo_committerteam |> ggplot(aes(x=team, y=repo)) +
+    geom_tile(aes(fill=median_added)) +
+    geom_text(aes(label=round(median_added, 0)), color="white") +
+    xlab("team") + ylab("repo") +
+    ggtitle(paste("Observed median number of added lines to files by team and repo"))
+```
+
+```{r}
+repo_committerteam |> ggplot(aes(x=team, y=repo)) +
+    geom_tile(aes(fill=mean_removed)) +
+    geom_text(aes(label=round(mean_removed, 0)), color="white") +
+    xlab("team") + ylab("repo") +
+    ggtitle(paste("Observed mean number of removed lines to files by team and repo"))
+```
+```{r}
+repo_committerteam |> ggplot(aes(x=team, y=repo)) +
+    geom_tile(aes(fill=median_removed)) +
+    geom_text(aes(label=round(median_removed, 0)), color="white") +
+    xlab("team") + ylab("repo") +
+    ggtitle(paste("Observed median number of removed lines to files by team and repo"))
+```
+
+
+Picking a random repo, and three random teams, show that the number of introduced duplicates follow a Poisson-like (or Negative Binomial) distribution, once you exclude all the zeros, for the zero-inflation part.
+
+```{r}
+plot_introd_issues_in_repo <- function(aRepo, team_selector) {
+  data |> filter(repo == aRepo, INTROD > 0, team_selector(committerteam)) |> group_by(committerteam) |> ggplot(aes(x=INTROD, color=committerteam, fill=committerteam)) + geom_histogram(position = "dodge", binwidth = 1) + ggtitle(paste("Introduced duplicates in repo", aRepo)) + scale_fill_manual(name="committerteam", values=teamcolors) + scale_colour_manual(name="committerteam", values=teamcolors)
+}
+three_teams <- function(x) x %in% c("Arch", "Green","Blue")
+
+plot_introd_issues_in_repo("Jupiter", three_teams)
+```
+
+There are also differences between teams --- we see that the "Arch" team in this repo introduced very few duplicates, whereas the Blue and Green teams were more comparable.
+
+The pattern is even more pronounced in the IntTest repo
+
+```{r}
+plot_introd_issues_in_repo("IntTest", three_teams)
+```
+
+There seem to be some team-level variation, as well as repo-level variation in the number of introduced duplicates.
+
+Comparing the largest repo, and the three largest contributors to that repo reveals that the Blue team is more likely to introduce a small amount of duplicates (it has almost double the amount of single-added duplicates as the Red team, which has a similar amount of contributions). But the red team has some more occurrences of 4-8 duplicates added to a single file.
+
+```{r}
+plot_introd_issues_in_repo("Jupiter", function(x) x %in% c("Red", "Green","Blue"))
+```
+
+Quantile plots
+
+```{r}
+repo_committerteam |> ggplot(aes(x=team, y=repo)) +
+    geom_tile(aes(fill=q95)) +
+    geom_text(aes(label=round(q95, 0)), color="white") +
+    xlab("team") + ylab("repo") +
+    ggtitle(paste("Observed 95% introductions by team and repo"))
+```
+
+The 95% quantile plots show that for many repos, and many teams in those repos, in 19 out of 20 file changes, no duplicates were added. The outlier is "IntTest", where many teams can be expected to introduce single-digit duplicates. In the "Neptune" repository, we also can expect some more duplicate introduction than in the others.
+
+
+```{r}
+repo_committerteam |> ggplot(aes(x=team, y=repo)) +
+    geom_tile(aes(fill=q99)) +
+    geom_text(aes(label=round(q99, 0)), color="white") +
+    xlab("team") + ylab("repo") +
+    ggtitle(paste("Observed 99% introductions by team and repo"))
+
+```
+
+The pattern repeats for the 99% quantile. Integration test can be expected to have more duplicates introduced, and in particular the Brown team stands out.
+In the Neptune repo, however, it is the Blue and Green teams that are a bit more likely to introduce duplicates.
+
+We also note that the Architect team are unlikely to introduce duplicates.
+
+
+```{r}
+repo_committerteam|> ggplot(aes(x=team, y=repo)) +
+    geom_tile(aes(fill=max)) +
+    geom_text(aes(label=round(max, 0)), color="white") +
+    xlab("team") + ylab("repo") +
+    ggtitle(paste("Observed max number of introduced duplicates by team and repo"))
+```
+
+The maximum number of introduced duplicates reveals that the Brown team, which also had high 95% value in the IntTest repo, also introduced 150 duplicates, the overall max value, to a single file in the integration test repository. 
+Overall, we see the pattern repeat:
+
+* Integration tests are highly likely to involve additions of duplicates
+* The architect team overall is highly unlikely to introduce any duplicates
+* There seems to be differences between teams in the numer of introduced duplicates, relative to their contributions. Differences between Red and Blue team, and also the Brown team stands out for introducing many duplicates in at least the integration test repository.
