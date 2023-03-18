@@ -13,6 +13,7 @@ library(dplyr)
 library(brms)
 library(tidybayes)
 library(bayesplot)
+library(patchwork)
 ```
 
 ## Data Ingestion and Model Building
@@ -93,9 +94,13 @@ data <- data_logscaled |> mutate(A = scale(logADD)[,1],
 CHAINS <- 4
 CORES <- 2
 ITERATIONS <- 4000
-THREADS <- 4
+THREADS <- 2
 ADAPT_DELTA <- 0.95
+SAVE_PARS <- save_pars(all = FALSE)
+```
 
+```{r}
+source("conditional_effects.R")
 ```
 
 # Exploratory Data Analysis
@@ -105,12 +110,45 @@ Introduced duplicates in files, per repo.
 data |> filter(INTROD > 0) |> group_by(repo, INTROD) |> tally()
 ```
 
-Most of the introduced duplicates are small (single-digits), but some are large, ranging into the hundreds.
+Most of the introduced duplicates are small (single-digits), but some are large, ranging into the hundreds for the IntTest.
 
 ```{r}
 changesPerRepoAndTeam <- data |> group_by(repo, authorteam) |> tally()
 zerosPerRepoAndTeam <- data |> filter(INTROD == 0) |> group_by(repo, authorteam) |> summarise(zeros=n())
-merge(changesPerRepoAndTeam, zerosPerRepoAndTeam) |> mutate(zeroIntrodRatio = zeros/n) |> arrange(zeroIntrodRatio) |> ggplot(aes(x=authorteam, y=zeroIntrodRatio, color=repo, size=n)) + geom_point() + ggtitle("Proportion of zero introduced duplicates, per repo and team")
+zeros_ratio <- merge(changesPerRepoAndTeam, zerosPerRepoAndTeam) |> mutate(zeroIntrodRatio = zeros/n) |> arrange(zeroIntrodRatio) 
+
+zeros_ratio |> ggplot(aes(x=authorteam, y=1-zeroIntrodRatio, color=repo, size=n)) + geom_point() + ggtitle("Proportion of introduced duplicates in one file, per repo and team")
+```
+```{r}
+data |> group_by(repo) |> ggplot(aes(x=logADD, y=logDEL, color=authorteam)) + geom_point() + facet_wrap( ~ repo)
+```
+
+```{r}
+additions_per_team <- function(t) {
+  d |> filter(team == t) |> ggplot(aes(x=A, y=R, color=repo)) + geom_point() + ggtitle(paste0("Scaled additions and removals by team ", t))
+}
+lapply(teams, function(t) additions_per_team(t))
+```
+
+```{r}
+introds_per_team <- function(t) {
+  d |> filter(team == t, y > 0) |> ggplot(aes(x=A, y=R, color=repo, size=y)) + geom_point() + ggtitle(paste0("Introductions by additions and removals by team ", t))
+}
+lapply(teams, function(t) introds_per_team(t))
+
+```
+
+
+```{r}
+unknownFileChanges <- changesPerRepoAndTeam |> filter(authorteam == "Unknown")
+allChanges <- data |> group_by(repo) |> summarize(filechanges = n())
+merge(unknownFileChanges |> select(repo, n), allChanges) |> mutate(ratio = n/filechanges)
+```
+
+Unknown team have made about 6-12% changes in various repos.
+
+```{r}
+head(zeros_ratio |> filter(repo == "Neptune"), 10)
 ```
 
 Teams have a different proportion of zero introduced duplicates. There seems to be some pattern here for us to investigate.
@@ -148,19 +186,21 @@ data |> filter(repo == "IntTest", INTROD > 0, authorteam == "Green") |> group_by
 data |> filter(repo == "IntTest", INTROD > 0, authorteam %in% c("Arch", "Orange", "Violet", "Green")) |> group_by(authorteam) |> ggplot(aes(x=INTROD, color=authorteam, fill=authorteam)) + geom_histogram(position = "dodge", binwidth = 1)
 ```
 
-The Arch team introduced very few duplicatesin the IntTest repository. The other teams introduced more, especially the Green team.
+The Arch team introduced very few duplicates in the IntTest repository. The other teams introduced more, especially the Green team.
 
 ```{r}
 data |> filter(repo == "IntTest", INTROD > 0, authorteam %in% c("Pink", "Arch", "UI")) |> group_by(authorteam) |> ggplot(aes(x=INTROD, color=authorteam, fill=authorteam)) + geom_histogram(position = "dodge", binwidth = 1) + ggtitle("Small contributors to IntTest repo, vs. Arch team")
 ```
 
-Some teams introduved very few duplicates --- but the UI team still introduved three files with between 15 and 31 duplicates. The Arch team introduced three files with 1, 2 and 4 duplicates, respectively.
+Some teams introduved very few duplicates --- but the UI team still introduced three files with between 15 and 31 duplicates. The Arch team introduced three files with 1, 2 and 4 duplicates, respectively.
 
 # Working Model
 
 * Terminology: $Weibull(\lambda, k)$, where $\lambda > 0$ is the *scale* parameter, and $k$ is the *shape* parameter
 * A Weibull distribution reduces to an exponential distribution when $k = 1$
 * A Weibull distribution is the same as a Generalized Gamma distribution with both its shape parameters $d$ and $p$ equal to $k$.
+
+# Intercept-only model (baseline)
 
 The simplest possible model, only intercepts (on population, committerteam and repo level):
 
@@ -202,7 +242,7 @@ M_intercepts_only <-
       backend="cmdstanr",
       file_refit = "on_change",
       threads = threading(THREADS),
-      save_pars = save_pars(all = TRUE),
+      save_pars = SAVE_PARS,
       adapt_delta = ADAPT_DELTA)
 ```
 Expected runtime: ~3600 seconds
@@ -223,10 +263,22 @@ M_intercepts_only <- add_criterion(M_intercepts_only, criterion = "loo")
 
 ```{r}
 m <- M_intercepts_only
-stopifnot(rhat(m) < 1.01)
-stopifnot(neff_ratio(m) > 0.2)
-mcmc_trace(m)
+#stopifnot(rhat(m) < 1.01)
+#stopifnot(neff_ratio(m) > 0.2)
 ```
+
+```{r}
+p <- mcmc_trace(m)
+pars <- levels(p[["data"]][["parameter"]])
+plots <- seq(1, to=length(pars), by=12)
+lapply(plots, function(i) { 
+  start <- i
+  end <- start+11
+  mcmc_trace(m, pars = na.omit(pars[start:end]))
+  })
+
+```
+
 ```{r}
 rhat(m) |> mcmc_rhat()
 neff_ratio(m) |> mcmc_neff()
@@ -265,18 +317,18 @@ mcmc_areas(m, regex_pars = c("^b_", "^b_zi", "^sd_"))
 ```
 
 ```{r}
-mcmc_areas(m, regex_pars = c("^r_committerteam[[]"))
+mcmc_areas(m, regex_pars = c("^r_team[[]"))
 
 ```
 
 ```{r}
 teams <- c("Arch", "Blue", "Brown", "Green", "Orange", "Pink", "Red", "UI", "Unknown", "Violet", "Yellow")
-lapply(teams, function(t) mcmc_areas(m, regex_pars = c(paste0("^r_committerteam:repo[[]", t))))
+lapply(teams, function(t) mcmc_areas(m, regex_pars = c(paste0("^r_team:repo[[]", t))))
 ```
 
 ```{r}
 repos <- c("IntTest", "Jupiter", "Saturn", "Uranus", "Neptune", "Venus", "Mars", "Mercury")
-lapply(repos, function(t) mcmc_areas(m, regex_pars = c(paste0("^r_committerteam:repo[[].*_", t,",Intercept[]]"))))
+lapply(repos, function(t) mcmc_areas(m, regex_pars = c(paste0("^r_team:repo[[].*_", t,",Intercept[]]"))))
 
 ```
 
@@ -320,7 +372,6 @@ The suspended rootogram shows that our model seems to somewhat overestimate the 
 
 
 ```{r}
-source("conditional_effects.R")
 ```
 
 ```{r}
@@ -342,7 +393,7 @@ Because of our simple model, all teams and repos share the same slope, only the 
 
 We can do better, given more compute power.
 
-# Incorporating A, C and D into our model
+# Full model (Incorporating A, C and D into our model
 
 Following our DAG, we could include A, R, C, D and possibly Reason (depending on whether we want to test if it impacts the number of added or removed lines) in our model. 
 However, we have to have a model that converges reasonably well as well.
@@ -353,6 +404,7 @@ d <- data |> select(y=INTROD,
                     A=A,
                     C=C,
                     D=D,
+                    R=R,
                     team=committerteam,
                     repo=repo)
 formula <- bf(y ~ 1 + A + C + D + (1 + A + C + D | team/repo),
@@ -407,7 +459,14 @@ M_full_model <- add_criterion(M_full_model, "loo")
 m <- M_full_model
 #stopifnot(rhat(m) < 1.01)
 #stopifnot(neff_ratio(m) > 0.2)
-mcmc_trace(m)
+p <- mcmc_trace(m)
+pars <- levels(p[["data"]][["parameter"]])
+plots <- seq(1, to=length(pars), by=12)
+lapply(plots, function(i) { 
+  start <- i
+  end <- start+11
+  mcmc_trace(m, pars = na.omit(pars[start:end]))
+  })
 ```
 ```{r}
 rhat(m) |> mcmc_rhat()
@@ -544,14 +603,14 @@ ftotBlue <- condeffect_logADD_by_logCOMPLEX(m, d, "Blue", "IntTest")
 ```
 
 ```{r}
-plot_logADD_by_logCOMPLEX(m, d, ftotArch, "Arch", "IntTest") + scale_y_continuous(limits=c(0, 50))
+plot_logADD_by_logCOMPLEX(m, d, ftotArch, "Arch", "IntTest") #+ scale_y_continuous(limits=c(0, 50))
 ```
 
 ```{r}
-plot_logADD_by_logCOMPLEX(m, d, ftotGreen, "Green", "IntTest") + scale_y_continuous(limits=c(0, 50))
+plot_logADD_by_logCOMPLEX(m, d, ftotGreen, "Green", "IntTest") #+ scale_y_continuous(limits=c(0, 50))
 ```
 ```{r}
-plot_logADD_by_logCOMPLEX(m, d, ftotBlue, "Blue", "IntTest") + scale_y_continuous(limits=c(0, 50))
+plot_logADD_by_logCOMPLEX(m, d, ftotBlue, "Blue", "IntTest") #+ scale_y_continuous(limits=c(0, 50))
 ```
 
 Again, we see that the complexity of the file has no significant impact on the number of introduced duplicates. The lines largely overlap.
@@ -563,9 +622,9 @@ ftotBlue <- condeffect_logADD_by_logDUP(m, d, "Blue", "IntTest")
 ```
 
 ```{r}
-plot_logADD_by_logDUP(m, d, ftotArch, "Arch", "IntTest") + scale_y_continuous(limits=c(0, 50))
-plot_logADD_by_logDUP(m, d, ftotGreen, "Green", "IntTest") + scale_y_continuous(limits=c(0, 50))
-plot_logADD_by_logDUP(m, d, ftotBlue, "Blue", "IntTest")
+plot_logADD_by_logDUP(m, d, ftotArch, "Arch", "IntTest") #+ scale_y_continuous(limits=c(0, 75))
+plot_logADD_by_logDUP(m, d, ftotGreen, "Green", "IntTest") #+ scale_y_continuous(limits=c(0, 75))
+plot_logADD_by_logDUP(m, d, ftotBlue, "Blue", "IntTest") #+ scale_y_continuous(limits=c(0, 75))
 ```
 
 For team Green, in particular, there seems to be an impact of the existing duplicates in the file. But for other teams, there is much less variation between the different D lines, so existing duplicates seem to play a smaller part.
@@ -580,9 +639,9 @@ ftotBlue <- condeffect_logADD_by_logCOMPLEX(m, d, "Blue", "Jupiter")
 ```
 
 ```{r}
-plot_logADD_by_logCOMPLEX(m, d, ftotArch, "Arch", "Jupiter")  + scale_y_continuous(limits=c(0, 60))
-plot_logADD_by_logCOMPLEX(m, d, ftotGreen, "Green", "Jupiter")  + scale_y_continuous(limits=c(0, 60))
-plot_logADD_by_logCOMPLEX(m, d, ftotBlue, "Blue", "Jupiter")  + scale_y_continuous(limits=c(0, 60))
+plot_logADD_by_logCOMPLEX(m, d, ftotArch, "Arch", "Jupiter")  + scale_y_continuous(limits=c(0, 50))
+plot_logADD_by_logCOMPLEX(m, d, ftotGreen, "Green", "Jupiter")+ scale_y_continuous(limits=c(0, 50))
+plot_logADD_by_logCOMPLEX(m, d, ftotBlue, "Blue", "Jupiter")  + scale_y_continuous(limits=c(0, 50))
 ```
 ```{r}
 ftotArch <- condeffect_logADD_by_logDUP(m, d, "Arch", "Jupiter")
@@ -591,11 +650,36 @@ ftotBlue <- condeffect_logADD_by_logDUP(m, d, "Blue", "Jupiter")
 ```
 
 ```{r}
-plot_logADD_by_logDUP(m, d, ftotArch, "Arch", "Jupiter") + scale_y_continuous(limits=c(0, 25)) + scale_x_continuous(limits=c(-2, 3.2))
-plot_logADD_by_logDUP(m, d, ftotGreen, "Green", "Jupiter") + scale_y_continuous(limits=c(0, 25)) + scale_x_continuous(limits=c(-2, 3.2))
-plot_logADD_by_logDUP(m, d, ftotBlue, "Blue", "Jupiter") + scale_y_continuous(limits=c(0, 25)) + scale_x_continuous(limits=c(-2, 3.2))
+plot_logADD_by_logDUP(m, d, ftotArch, "Arch", "Jupiter") #+ scale_y_continuous(limits=c(0, 75)) #+ scale_x_continuous(limits=c(-2, 3.2))
+plot_logADD_by_logDUP(m, d, ftotGreen, "Green", "Jupiter") #+ scale_y_continuous(limits=c(0, 75)) #+ scale_x_continuous(limits=c(-2, 3.2))
+plot_logADD_by_logDUP(m, d, ftotBlue, "Blue", "Jupiter") #+ scale_y_continuous(limits=c(0, 75)) #+ scale_x_continuous(limits=c(-2, 3.2))
 ```
 In the Jupiter repo, we see clear team-level impacts of the existing number of duplicates The Arch team are unlikely to introduce more than a few duplicates, while the Green and Blue team are correspondingly more likely to introduce duplicates, provided that the magnitude of the number of added lines are 2 or more.
+
+
+```{r}
+ftotArch <- condeffect_logADD_by_logREMOVED(m, d, "Arch", "Jupiter")
+ftotGreen <- condeffect_logADD_by_logREMOVED(m, d, "Green", "Jupiter")
+ftotBlue <- condeffect_logADD_by_logREMOVED(m, d, "Blue", "Jupiter")
+```
+
+```{r}
+plot_logADD_by_logREMOVED(m, d, ftotArch, "Arch", "Jupiter") + scale_y_continuous(limits=c(0, 75)) #+ scale_x_continuous(limits=c(-2, 3.2))
+plot_logADD_by_logREMOVED(m, d, ftotGreen, "Green", "Jupiter") + scale_y_continuous(limits=c(0, 75)) #+ scale_x_continuous(limits=c(-2, 3.2))
+plot_logADD_by_logREMOVED(m, d, ftotBlue, "Blue", "Jupiter") + scale_y_continuous(limits=c(0, 75)) #+ scale_x_continuous(limits=c(-2, 3.2))
+
+```
+
+```{r}
+library(marginaleffects)
+```
+```{r}
+marginaleffects(m)
+```
+
+
+
+
 
 ```{r}
 bayes_R2(m)
@@ -612,4 +696,827 @@ bayes_R2(M_intercepts_only)
 We see both from the `bayes_R2` and the `loo_compare` functions that the full model is to be preferred over the intercept-only model.
 But it still only explains about 50% of the variance in the data.
 
+```{r}
+summary(M_full_model)
+```
+
+```{r}
+ranef(M_full_model)
+```
+
+
+
+# Adding removed lines
+
+```{r}
+d <- data |> select(y=INTROD,
+                    A=A,
+                    C=C,
+                    D=D,
+                    R=R,
+                    team=committerteam,
+                    repo=repo)
+formula <- bf(y ~ 1 + A + C + D + R + (1 + A + C + D + R | team/repo),
+              zi ~ 1 + A )
+
+get_prior(data=d,
+          family=zero_inflated_negbinomial,
+          formula=formula)
+```
+
+```{r}
+priors <- c(prior(normal(0, 0.5), class = Intercept),
+            prior(normal(0, 0.25), class = b),
+            prior(weibull(2, 1), class = sd),
+            prior(lkj(2), class = cor),
+            prior(normal(0, 0.5), class = Intercept, dpar=zi),
+            prior(normal(0.5, 0.5), class = b, dpar=zi),
+            prior(gamma(1, 0.1), class = shape))
+validate_prior(prior=priors,
+               formula=formula,
+               data=d,
+               family=zero_inflated_negbinomial)
+
+```
+
+Full model takes about 15000 seconds to complete on my i9 laptop.
+
+```{r}
+M_fuller_model <-
+  brm(data = d,
+      family = zero_inflated_negbinomial,
+      file = ".cache/added/M_fuller_model",
+      formula = formula,
+      prior = priors,
+      warmup = 1000,
+      iter  = ITERATIONS,
+      chains = CHAINS,
+      cores = CORES,
+      backend="cmdstanr",
+      file_refit = "on_change",
+      threads = threading(THREADS),
+      save_pars = SAVE_PARS,
+      adapt_delta = ADAPT_DELTA)
+```
+
+```{r}
+M_fuller_model <- add_criterion(M_fuller_model, "loo")
+```
+```{r}
+m <- M_fuller_model
+#stopifnot(rhat(m) < 1.01)
+#stopifnot(neff_ratio(m) > 0.2)
+```
+```{r}
+p <- mcmc_trace(m)
+pars <- levels(p[["data"]][["parameter"]])
+plots <- seq(1, to=length(pars), by=12)
+lapply(plots, function(i) { 
+  start <- i
+  end <- start+11
+  mcmc_trace(m, pars = na.omit(pars[start:end]))
+  })
+```
+```{r}
+rhat(m) |> mcmc_rhat()
+neff_ratio(m) |> mcmc_neff()
+```
+
+Both Rhat and Neff ratio looks good.
+
+```{r}
+loo <- loo(m)
+loo
+plot(loo)
+```
+
+```{r}
+summary(m)
+```
+
+```{r}
+mcmc_areas(m, regex_pars = c("^b_"))
+```
+
+```{r}
+mcmc_areas(m, regex_pars = c("^sd_"))
+```
+
+```{r}
+pars <- c("Intercept", "A", "D", "C", "R")
+lapply(pars, function(p) mcmc_areas(m, regex_pars = c(paste0("^r_team[[].*,", p, "[]]"))))
+```
+
+```{r}
+lapply(pars, function(p) lapply(teams, function(t) mcmc_areas(m, regex_pars = c(paste0("^r_team:repo[[]", t, ".*,", p, "[]]")))))
+```
+
+```{r}
+ftotArch <- condeffect_logADD_by_logDUP(m, d, "Arch", "IntTest")
+ftotGreen <- condeffect_logADD_by_logDUP(m, d, "Green", "IntTest")
+ftotBlue <- condeffect_logADD_by_logDUP(m, d, "Blue", "IntTest")
+```
+
+```{r}
+plot_logADD_by_logDUP(m, d, ftotArch, "Arch", "IntTest") + scale_y_continuous(limits=c(0, 75))
+plot_logADD_by_logDUP(m, d, ftotGreen, "Green", "IntTest") + scale_y_continuous(limits=c(0, 75))
+plot_logADD_by_logDUP(m, d, ftotBlue, "Blue", "IntTest") + scale_y_continuous(limits=c(0, 75))
+```
+
+```{r}
+lapply(pars, function(p) lapply(repos, function(r) mcmc_areas(m, regex_pars = c(paste0("^r_team:repo[[].*_", r,",", p, "[]]")))))
+```
+
+
+```{r}
+plot(hypothesis(m, "R = 0"))
+```
+
+```{r}
+hypA <- hypothesis(m, "C = 0")
+hypA |> glimpse()
+plot(hypA)
+```
+
+```{r}
+loo_compare(M_intercepts_only, M_full_model, M_fuller_model)
+```
+
+
+
+```{r}
+library(marginaleffects)
+```
+
+```{r}
+mareff <- marginaleffects(M_fuller_model, by="team", newdata="mean")
+```
+
+```{r}
+print(mareff, nrows = 200)
+```
+
+
+```{r}
+bayes_R2(M_intercepts_only)
+```
+
+```{r}
+bayes_R2(M_full_model)
+```
+
+```{r}
+bayes_R2(M_fuller_model)
+```
+
+```{r}
+rootogram_intercepts <- pp_check(M_intercepts_only, type = "rootogram", style="suspended")
+```
+```{r}
+rootogram_intercepts + scale_y_continuous(limits=c(0, 35))  + scale_x_continuous(limits=c(0,150))
+```
+
+```{r}
+rootogram_full <- pp_check(M_full_model, type = "rootogram", style="suspended")
+```
+```{r}
+rootogram_full + scale_y_continuous(limits=c(0, 35))  + scale_x_continuous(limits=c(0,150))
+```
+
+```{r}
+rootogram_fuller <- pp_check(M_fuller_model, type = "rootogram", style="suspended")
+```
+```{r}
+rootogram_fuller + scale_y_continuous(limits=c(0, 35))  + scale_x_continuous(limits=c(0,150))
+```
+
+# Causal model
+
+```{r}
+d <- data |> select(y=INTROD,
+                    A=A,
+                    C=C,
+                    D=D,
+                    R=R,
+                    team=committerteam,
+                    repo=repo)
+formula <- bf(y ~ 1 + A + R + (1 + A + R | team) + (1 + A + R | repo),
+              zi ~ 1 + A + R)
+
+get_prior(data=d,
+          family=zero_inflated_negbinomial,
+          formula=formula)
+
+```
+
+```{r}
+priors <- c(prior(normal(0, 0.5), class = Intercept),
+            prior(normal(0, 0.25), class = b),
+            prior(weibull(2, 1), class = sd),
+            prior(lkj(2), class = cor),
+            prior(normal(0, 0.5), class = Intercept, dpar=zi),
+            prior(normal(0, 0.5), class = b, dpar=zi),
+            prior(gamma(1, 0.1), class = shape))
+validate_prior(prior=priors,
+               formula=formula,
+               data=d,
+               family=zero_inflated_negbinomial)
+```
+
+```{r}
+M_crossed_model <-
+  brm(data = d,
+      family = zero_inflated_negbinomial,
+      file = ".cache/added/M_crossed_model",
+      formula = formula,
+      prior = priors,
+      warmup = 1000,
+      iter  = ITERATIONS,
+      chains = CHAINS,
+      cores = CORES,
+      backend="cmdstanr",
+      file_refit = "on_change",
+      threads = threading(THREADS),
+      save_pars = SAVE_PARS,
+      adapt_delta = ADAPT_DELTA)
+
+```
+
+```{r}
+M_crossed_model <- add_criterion(M_crossed_model, "loo")
+```
+
+```{r}
+m <- M_crossed_model
+```
+
+```{r}
+p <- mcmc_trace(m)
+pars <- levels(p[["data"]][["parameter"]])
+plots <- seq(1, to=length(pars), by=12)
+lapply(plots, function(i) { 
+  start <- i
+  end <- start+11
+  mcmc_trace(m, pars = na.omit(pars[start:end]))
+  })
+```
+```{r}
+rhat(m) |> mcmc_rhat()
+neff_ratio(m) |> mcmc_neff()
+```
+
+Both Rhat and Neff ratio looks good.
+
+```{r}
+loo <- loo(m)
+loo
+plot(loo)
+```
+```{r}
+reloo <- reloo(m, loo, chains=CHAINS)
+```
+```{r}
+plot(reloo)
+```
+
+```{r}
+reloo
+```
+
+```{r}
+summary(m)
+```
+
+```{r}
+yrep <- posterior_predict(m)
+```
+
+Proportion of zeros
+
+```{r}
+ppc_stat(y = d$y, yrep, stat = function(y) mean(y == 0))
+```
+
+The zero-inflation seems to be working very well.
+
+The observed max value ranges falls well within the predicted max value for the individual observations. 
+Compared to the intercept-only model, the predicted max value are about a magnitude higher. This indicates that we might have some priors that are a bit too wild, or some imbalance in our data (which we know we have - some teams make few or no commits in some repos).
+But there are still no extreme max values (e.g. 1e6 or more - we know that the total number of observed lines of code is around 1e5, so it is impossible to have more that those amounts of duplicates).
+
+```{r}
+ppc_stat(y = d$y, yrep, stat = "max")
+```
+```{r}
+rootogram <- pp_check(m, type = "rootogram", style="suspended")
+```
+```{r}
+rootogram
+```
+
+Rootogram, sized according to reasonable (observed) values.
+
+```{r}
+rootogram + scale_y_continuous(limits=c(0, 35))  + scale_x_continuous(limits=c(0,150))
+```
+
+# teams per repo
+
+```{r}
+d <- data |> select(y=INTROD,
+                    A=A,
+                    C=C,
+                    D=D,
+                    R=R,
+                    team=committerteam,
+                    repo=repo)
+formula <- bf(y ~ 1 + A + R + (1 + A + R + repo | team) + (1 + A + R | repo),
+              zi ~ 1 + A + R)
+
+get_prior(data=d,
+          family=zero_inflated_negbinomial,
+          formula=formula)
+
+```
+
+```{r}
+priors <- c(prior(normal(0, 0.5), class = Intercept),
+            prior(normal(0, 0.25), class = b),
+            prior(weibull(2, 1), class = sd),
+            prior(lkj(2), class = cor),
+            prior(normal(0, 0.5), class = Intercept, dpar=zi),
+            prior(normal(0, 0.5), class = b, dpar=zi),
+            prior(gamma(1, 0.1), class = shape))
+validate_prior(prior=priors,
+               formula=formula,
+               data=d,
+               family=zero_inflated_negbinomial)
+```
+
+```{r}
+M_crossed_team_repo_model <-
+  brm(data = d,
+      family = zero_inflated_negbinomial,
+      file = ".cache/added/M_crossed_team_repo_model",
+      formula = formula,
+      prior = priors,
+      warmup = 1000,
+      iter  = ITERATIONS,
+      chains = CHAINS,
+      cores = CORES,
+      backend="cmdstanr",
+      file_refit = "on_change",
+      threads = threading(THREADS),
+      save_pars = SAVE_PARS,
+      adapt_delta = ADAPT_DELTA)
+
+```
+
+```{r}
+M_crossed_team_repo_model <- add_criterion(M_crossed_team_repo_model, "loo")
+```
+
+```{r}
+m <- M_crossed_team_repo_model
+```
+
+```{r}
+p <- mcmc_trace(m)
+pars <- levels(p[["data"]][["parameter"]])
+plots <- seq(1, to=length(pars), by=12)
+lapply(plots, function(i) { 
+  start <- i
+  end <- start+11
+  mcmc_trace(m, pars = na.omit(pars[start:end]))
+  })
+```
+
+```{r}
+rhat(m) |> mcmc_rhat()
+neff_ratio(m) |> mcmc_neff()
+```
+
+Both Rhat and Neff ratio looks good.
+
+```{r}
+loo <- loo(m)
+loo
+plot(loo)
+```
+
+```{r}
+summary(m)
+```
+
+```{r}
+yrep <- posterior_predict(m)
+```
+
+Proportion of zeros
+
+```{r}
+ppc_stat(y = d$y, yrep, stat = function(y) mean(y == 0))
+```
+
+```{r}
+ppc_stat(y = d$y, yrep, stat = "max")
+```
+```{r}
+rootogram <- pp_check(m, type = "rootogram", style="suspended")
+```
+```{r}
+rootogram
+```
+
+Rootogram, sized according to reasonable (observed) values.
+
+```{r}
+rootogram + scale_y_continuous(limits=c(0, 35))  + scale_x_continuous(limits=c(0,150))
+```
+
+
+```{r}
+team_predict <- function(t, rep, a=1, r=1, c=0, d=0) {
+  nd <- expand_grid(A=a, R=r, C=c, D=d, repo=rep, team=t)
+  pred <- posterior_predict(m, newdata=nd)
+  colnames(pred) <- levels(d$repo)
+  return(data.frame(pred) |> pivot_longer(everything(), names_to="repo", values_to = "pred"))
+}
+```
+
+```{r}
+newdata <- expand_grid(A=1,
+                       R=1,
+                       repo=levels(d$repo),
+                       team="Arch")
+teamArch <- posterior_predict(m, newdata=newdata, seed=12354)
+
+colnames(teamArch) <- levels(d$repo)
+
+#head(teamArch)
+
+summary(teamArch)
+```
+
+```{r}
+bluePred <- team_predict("Blue", a=1, r=1)
+
+```
+Figure out how to work with the stat-halfeye...
+
+So, the raincloud plot plots all predictions as dots under the distribution. But the distribution already contains the predictions... But it might make sense to instead of the predictions plot the (relative) number of observations...
+This would make the distribution mimic the posterior, and the raindrops mimic the raw data...
+But note that this would be only be useful as a posterior predictive check, where the predictions arise from the exact save data as the observations. For predictions (fixing the value of the parameters), it would be pointless... Better to use the standard tools there...
+
+
+```{r}
+ypred <- posterior_predict(m)
+#Sobs <- d |> filter(repo == "IntTest") |> select(y, repo)
+```
+
+
+```{r}
+bluePred |> filter(repo == "IntTest") |> ggplot(aes(x=pred, group=repo, color=repo, fill=repo)) + stat_halfeye() + scale_x_continuous(limits=c(0,15)) #+ stat_dots(side="left", binwidth=0.25) #+ facet_wrap(~ repo) 
+```
+
+```{r}
+team_predict("Blue", a=2, r=2) |> filter(repo == "IntTest") |> ggplot(aes(x=pred, group=repo, color=repo, fill=repo)) + stat_halfeye() + scale_x_continuous(limits=c(0,15)) 
+
+```
+
+```{r}
+predPerRepo <- team_predict("Blue", a=2, r=2) |> filter(repo == "IntTest") |> tally()
+
+team_predict("Blue", a=2, r=2) |> filter(repo == "IntTest") |> group_by(pred) |> summarize(proportion=round(n()/predPerRepo$n, 3))
+```
+
+```{r}
+team_predict("Red", a=2, r=2) |> filter(repo == "IntTest") |> group_by(pred) |> summarize(proportion=round(n()/predPerRepo$n, 3))
+```
+
+A 3 and R 0 gives relatively unlikely chance of 0 added duplicates! How come? Because A and R tends to cancel each other out?
+
+```{r}
+team_predict("Arch", a=3, r=0) |> filter(repo == "IntTest") |> group_by(pred) |> summarize(proportion=round(n()/predPerRepo$n, 3))
+
+```
+
+```{r}
+range(d$A)
+range(d$R)
+mean(data$logADD)/sd(data$logADD)
+
+exp((range(d$A)*sd(data$logADD)+mean(data$logADD)))-1
+exp((range(d$R)*sd(data$logDEL)+mean(data$logDEL)))-1
+```
+
+```{r}
+percentage_zeros <- function(model, aTeam) {
+  items <- 5000
+  repos <- data.frame(team=aTeam, repo=levels(d$repo))
+  as <- data.frame(A=seq(from=min(d$A), to=4, length.out=20))
+  rs <- data.frame(R=seq(from=min(d$R), to=4, length.out=20))
+  grid <- expand_grid(repos, expand_grid(as, rs))
+  perczeros <- posterior_predict(model, newdata=grid, ndraws=items) |> data.frame() |> sapply(function(x) { length(which(x==0))/length(x) } ) 
+  grid$pct <- perczeros
+  grid$added <- exp(grid$A*sd(data$logADD)+mean(data$logADD))-1
+  grid$removed <- exp(grid$R*sd(data$logDEL)+mean(data$logDEL))-1
+  return(grid)
+}
+```
+
+```{r}
+p <- percentage_zeros(m, "Arch")
+head(p, 20)
+```
+
+```{r}
+zero_introd_per_team_repo <- function(postpercentage, aRepo) {
+  team <- postpercentage |> select(team) |> distinct()
+  ybreaks <- c(-1, 0, 1, 2, 3, 4)
+  ylabels <- round(exp(ybreaks*sd(data$logDEL)+mean(data$logDEL))-1, 0)
+  xbreaks <- c(-1, 0, 1, 2, 3, 4)
+  xlabels <- round(exp(xbreaks*sd(data$logADD)+mean(data$logADD))-1, 0)
+  postpercentage |> mutate(probDup = 1-pct) |> filter(repo == aRepo) |> ggplot(aes(x=A, y=R, fill=probDup)) + geom_tile() + scale_fill_gradient(breaks=c(0, 0.2, 0.4, 0.6, 0.8, 1), low="white", high="black", limits=c(0,1)) + xlab("added") + scale_x_continuous(breaks=xbreaks, labels=xlabels) + ylab("deleted") +  scale_y_continuous(breaks=ybreaks, labels=ylabels) + ggtitle(paste0("Probability of team ", team, " introducing duplicates in ", aRepo))
+}
+```
+
+```{r}
+library(ggExtra)
+```
+
+
+```{r}
+zero_introd_per_team_repo(p, "IntTest")
+```
+
+```{r}
+zero_introd_per_team_repo(p, "Jupiter")
+```
+```{r}
+lapply(repos, function(r) zero_introd_per_team_repo(p, r))
+```
+
+```{r}
+pRed <- percentage_zeros(m, "Red")
+```
+
+
+```{r}
+pRed |> filter( repo == "Venus", added > 5000)
+```
+
+```{r}
+p |> filter(repo == "Venus", added > 5000)
+```
+
+
+
+```{r}
+lapply(repos, function(r) zero_introd_per_team_repo(pRed, r))
+```
+
+```{r}
+pOrange <- percentage_zeros(m, "Orange")
+```
+
+```{r}
+lapply(repos, function(r) zero_introd_per_team_repo(pOrange, r))
+```
+
+```{r}
+pBlue <- percentage_zeros(m, "Blue")
+```
+
+```{r}
+lapply(repos, function(r) zero_introd_per_team_repo(pBlue, r))
+```
+
+
+```{r}
+pYellow <- percentage_zeros(m, "Yellow")
+```
+
+```{r}
+lapply(repos, function(r) zero_introd_per_team_repo(pYellow, r))
+
+```
+
+```{r}
+zero_introd_per_team_repo(p, "IntTest") | zero_introd_per_team_repo(pBlue, "IntTest") 
+```
+
+```{r}
+zero_introd_per_team_repo(p, "Neptune") | zero_introd_per_team_repo(pBlue, "Neptune") 
+```
+```{r}
+pGreen <- percentage_zeros(m, "Green")
+```
+
+```{r}
+lapply(repos, function(r) zero_introd_per_team_repo(pGreen, r))
+
+```
+
+```{r}
+zero_introd_per_team_repo(p, "Neptune") | zero_introd_per_team_repo(pGreen, "Neptune") #| zero_introd_per_team_repo(pYellow, "Neptune")
+
+```
+
+```{r}
+zero_introd_per_team_repo(pGreen, "Neptune") | zero_introd_per_team_repo(pBlue, "Neptune") #| zero_introd_per_team_repo(pYellow, "Neptune")
+
+```
+
+```{r}
+tail(p)
+```
+
+
+# Team, Repo, Added, Removed, Duplicates, Complexity
+
+```{r}
+d <- data |> select(y=INTROD,
+                    A=A,
+                    C=C,
+                    D=D,
+                    R=R,
+                    team=committerteam,
+                    repo=repo)
+formula <- bf(y ~ 1 + A + R + C + D + (1 + A + R + C + D + repo | team) + (1 + A + R | repo),
+              zi ~ 1 + A + R + C + D)
+
+get_prior(data=d,
+          family=zero_inflated_negbinomial,
+          formula=formula)
+
+```
+
+```{r}
+priors <- c(prior(normal(0, 0.5), class = Intercept),
+            prior(normal(0, 0.25), class = b),
+            prior(weibull(2, 1), class = sd),
+            prior(lkj(2), class = cor),
+            prior(normal(0, 0.5), class = Intercept, dpar=zi),
+            prior(normal(0, 0.5), class = b, dpar=zi),
+            prior(gamma(1, 0.1), class = shape))
+validate_prior(prior=priors,
+               formula=formula,
+               data=d,
+               family=zero_inflated_negbinomial)
+```
+
+```{r}
+M_crossed_team_repo_complex_dup_model <-
+  brm(data = d,
+      family = zero_inflated_negbinomial,
+      file = ".cache/added/M_crossed_team_repo_complex_dup_model",
+      formula = formula,
+      prior = priors,
+      warmup = 1000,
+      iter  = ITERATIONS,
+      chains = CHAINS,
+      cores = CORES,
+      backend="cmdstanr",
+      file_refit = "on_change",
+      threads = threading(THREADS),
+      save_pars = SAVE_PARS,
+      adapt_delta = ADAPT_DELTA)
+```
+
+```{r}
+M_crossed_team_repo_complex_dup_model <- add_criterion(M_crossed_team_repo_complex_dup_model, "loo")
+```
+
+
+```{r}
+d <- data |> select(y=INTROD,
+                    A=A,
+                    C=C,
+                    D=D,
+                    R=R,
+                    team=committerteam,
+                    repo=repo)
+formula <- bf(y ~ 1 + A + R + C + D + repo + (1 + A + R + C + D + repo | team),
+              zi ~ 1 + A + R + C + D + repo)
+
+get_prior(data=d,
+          family=zero_inflated_negbinomial,
+          formula=formula)
+
+```
+
+```{r}
+priors <- c(prior(normal(0, 0.5), class = Intercept),
+            prior(normal(0, 0.25), class = b),
+            prior(weibull(2, 1), class = sd),
+            prior(lkj(2), class = cor),
+            prior(normal(0, 0.5), class = Intercept, dpar=zi),
+            prior(normal(0, 0.5), class = b, dpar=zi),
+            prior(gamma(1, 0.1), class = shape))
+validate_prior(prior=priors,
+               formula=formula,
+               data=d,
+               family=zero_inflated_negbinomial)
+```
+
+```{r}
+M_crossed_team_repo_complex_dup_repo_pop <-
+  brm(data = d,
+      family = zero_inflated_negbinomial,
+      file = ".cache/added/M_crossed_team_repo_complex_dup_repo_pop",
+      formula = formula,
+      prior = priors,
+      warmup = 1000,
+      iter  = ITERATIONS,
+      chains = CHAINS,
+      cores = CORES,
+      backend="cmdstanr",
+      file_refit = "on_change",
+      threads = threading(THREADS),
+      save_pars = SAVE_PARS,
+      adapt_delta = ADAPT_DELTA)
+```
+
+```{r}
+M_crossed_team_repo_complex_dup_repo_pop <- add_criterion(M_crossed_team_repo_complex_dup_repo_pop, "loo")
+```
+
+```{r}
+m <- M_crossed_team_repo_complex_dup_repo_pop
+```
+
+
+```{r}
+nd <- data.frame(A=0, R=0, C=0, D=0, team="Arch", repo="IntTest")
+pp <- posterior_predict(M_crossed_team_repo_complex_dup_repo_pop, newdata = nd)
+
+```
+
+
+```{r}
+data.frame(teamArch) |> pivot_longer(everything(), names_to="repo", values_to = "pred") |> ggplot(aes(x=pred, group=repo, color=repo)) + stat_halfeye() + scale_x_continuous(limits=c(0,10))
+```
+```{r}
+nd <- tibble(A=1, R=1, C=1, D=1, repo="IntTest", team="Arch")
+newdata[4:5,]
+pred <- posterior_predict(M_crossed_team_repo_model, newdata=nd, seed=12354)
+summary(pred)
+```
+
+
+
+```{r}
+posterior_predict(m, newdata = expand_grid(A=1,
+                       R=1,
+                       repo=levels(d$repo),
+                       team="Arch"), resp=levels(d$repo), ndraws=10000) |> data.frame() |> 
+  pivot_longer(everything(), names_to="repoid", values_to="count") |> mutate(repoid = as.factor(repoid)) |> group_by(repoid) |> summarise(sum(count)/1e4, max(count))
+```
+
+```{r}
+posterior_predict(m, newdata = expand_grid(A=1,
+                       R=1,
+                       repo=levels(d$repo),
+                       team="Arch"), resp=levels(d$repo), ndraws=10000) |> data.frame() |> 
+  pivot_longer(everything(), names_to="repoid", values_to="count") |> mutate(repoid = as.factor(repoid)) |> group_by(repoid) |>
+  filter(count > 0) |> ggplot(aes(x=count, group=repoid, color=repoid, fill=repoid)) + geom_histogram(position = "dodge", binwidth = 1)
+#  summarise(sum(count)/1e4, max(count))
+
+```
+```{r}
+library(tidybayes)
+
+#summarise_draws(tidy_draws(m))
+
+add_predicted_draws(m, newdata=expand_grid(A=1,
+                       R=1,
+                       repo=levels(d$repo),
+                       team=levels(d$team))) |> select(repo, team, .prediction) |> 
+  mutate(repo = as.factor(repo), team=as.factor(team), ypred=.prediction) |> select(-.prediction) |> 
+  group_by(repo, team) |> ggplot(aes(x=ypred, color=team, fill=team)) + geom_histogram(position = "dodge") + facet_wrap(~ repo)
+```
+```{r}
+loo_compare(M_intercepts_only, M_full_model, M_fuller_model, M_crossed_model, M_crossed_team_repo_model)
+```
+
+```{r}
+loo_compare(M_intercepts_only, M_crossed_model, M_crossed_team_repo_model)
+```
+
+```{r}
+m <- M_crossed_team_repo_complex_dup_repo_pop
+```
+
+
+
+```{r}
+posterior_predict(m, newdata = expand_grid(A=1,
+                       R=1,
+                       repo=levels(d$repo),
+                       team=levels(d$team)), ndraws=10000) |> data.frame() |> head()
+#  pivot_longer(everything(), names_to="repoid", values_to="count") |> mutate(repoid = as.factor(repoid)) |> head() #group_by(team, repoid) |>
+ # filter(count > 0) |> ggplot(aes(x=count, group=repoid, color=repoid, fill=repoid)) + geom_histogram(position = "dodge", binwidth = 1)
+#  summarise(sum(count)/1e4, max(count))
+
+```
 

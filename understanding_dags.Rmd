@@ -388,3 +388,7 @@ drawdag(introd.dag.8)
 
 But it seems unlikely that REASON would impact ADDED lines without first going through ADDED or REMOVED lines (e.g. does the REASON has a different cause than going through the AUTHOR/TEAM process?)
 
+```{r}
+adjustmentSets(introd.dag.8, exposure = "REPO", outcome = "INTROD", effect = "direct")
+```
+
