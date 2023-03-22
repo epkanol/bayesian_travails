@@ -12,10 +12,6 @@ library(GGally)
 library(tidyr)
 library(dplyr)
 library(brms)
-library(tidybayes)
-library(bayesplot)
-library(patchwork)
-library(RColorBrewer)
 ```
 
 ## Exploring why certain teams introduce duplicates
@@ -116,8 +112,9 @@ ggpairs(data |> select(logADD, logDEL, logCOMPLEX, logDUP))
 ```
 
 ```{r}
-repo_committerteam <- data |> group_by(repo, committerteam) |> summarize(q95=quantile(INTROD, 0.95),
-                                                                         q99=quantile(INTROD, 0.99),
+# quantile type 3 to avoid having interpolation of the observations
+repo_committerteam <- data |> group_by(repo, committerteam) |> summarize(q95=quantile(INTROD, 0.95, type=3),
+                                                                         q99=quantile(INTROD, 0.99, type=3),
                                                                          max=max(INTROD),
                                                                          files=n(),
                                                                          mean_added=mean(ADD),
@@ -182,6 +179,10 @@ three_teams <- function(x) x %in% c("Arch", "Green","Blue")
 plot_introd_issues_in_repo("Jupiter", three_teams)
 ```
 
+```{r}
+data |> filter(committerteam %in% c("Arch", "Blue", "Red"), repo == "Jupiter") |> group_by(INTROD, committerteam) |> tally()
+```
+
 There are also differences between teams --- we see that the "Arch" team in this repo introduced very few duplicates, whereas the Blue and Green teams were more comparable.
 
 The pattern is even more pronounced in the IntTest repo
@@ -232,6 +233,20 @@ repo_committerteam|> ggplot(aes(x=team, y=repo)) +
     geom_text(aes(label=round(max, 0)), color="white") +
     xlab("team") + ylab("repo") +
     ggtitle(paste("Observed max number of introduced duplicates by team and repo"))
+```
+```{r}
+data |> group_by(repo, committerteam) |> select(committer) |> distinct() |> tally() |> ggplot(aes(x=committerteam, y=repo)) +
+    geom_tile(aes(fill=n)) +
+    geom_text(aes(label=n), color="white") +
+    xlab("team") + ylab("repo") +
+    ggtitle(paste("Observed number of committers by team and repo"))
+```
+```{r}
+data |> group_by(repo, authorteam) |> select(author) |> distinct() |> tally() |> ggplot(aes(x=authorteam, y=repo)) +
+    geom_tile(aes(fill=n)) +
+    geom_text(aes(label=n), color="white") +
+    xlab("team") + ylab("repo") +
+    ggtitle(paste("Observed number of authors by team and repo"))
 ```
 
 The maximum number of introduced duplicates reveals that the Brown team, which also had high 95% value in the IntTest repo, also introduced 150 duplicates, the overall max value, to a single file in the integration test repository. 

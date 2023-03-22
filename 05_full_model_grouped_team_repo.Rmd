@@ -1,0 +1,315 @@
+---
+title: "05 Full Model with team and team:repo groupings"
+author: "Anders Sundelin"
+date: "2023-03-19"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(GGally)
+library(tidyr)
+library(dplyr)
+library(brms)
+library(tidybayes)
+library(bayesplot)
+library(patchwork)
+```
+
+
+```{r}
+set.seed(12345)
+source("ingest_data.R")
+```
+
+# Variation between teams, and between teams and repos
+
+```{r}
+d <- data |> select(y=INTROD,
+                    A=A,
+                    C=C,
+                    D=D,
+                    R=R,
+                    team=committerteam,
+                    repo=repo)
+formula <- bf(y ~ 1 + A + R + C + D + (1 + A + R + C + D | team) + (1 + A + R + C + D | team:repo),
+              zi ~ 1 + A + R + C + D)
+get_prior(data=d,
+          family=zero_inflated_negbinomial,
+          formula=formula)
+```
+```{r}
+priors <- c(prior(normal(0, 0.5), class = Intercept),
+            prior(normal(0, 0.25), class = b),
+            prior(weibull(2, 0.1), class = sd),
+            prior(weibull(2, 0.1), class = sd, group=team:repo),
+            prior(lkj(2), class = cor),
+            prior(normal(0, 0.5), class = Intercept, dpar=zi),
+            prior(normal(0, 0.25), class = b, dpar=zi),
+            prior(gamma(1, 1), class = shape))
+
+v <- validate_prior(prior=priors,
+               formula=formula,
+               data=d,
+               family=zero_inflated_negbinomial)
+v
+```
+
+
+```{r}
+M_ppc <- brm(data = d,
+      family = zero_inflated_negbinomial,
+      formula = formula,
+      prior = priors,
+      warmup = 1000,
+      iter  = ITERATIONS,
+      chains = CHAINS,
+      cores = CORES,
+      sample_prior = "only",
+      backend="cmdstanr",
+      file_refit = "on_change",
+      threads = threading(THREADS),
+      save_pars = SAVE_PARS,
+      adapt_delta = ADAPT_DELTA)
+```
+
+
+```{r}
+m <- M_ppc
+```
+
+
+```{r prior_predict}
+yrep <- posterior_predict(m)
+```
+
+Proportion of zeros
+
+```{r}
+ppc_stat(y = d$y, yrep, stat = function(y) mean(y == 0))
+```
+
+We had to adapt our priors quite significantly to get some realistic estimates.
+
+```{r}
+sim_max <- ppc_stat(y = d$y, yrep, stat = "max")
+sim_max
+```
+```{r}
+sim_max + scale_x_continuous(limits = c(0,1000))
+```
+
+
+```{r}
+ppc_stat(y = d$y, yrep, stat = function(y) quantile(y, 0.99)) + ggtitle("Prior predicted Q99 vs. observed value")
+```
+
+
+```{r}
+q95 <- function(y) quantile(y, 0.95)
+q99 <- function(y) quantile(y, 0.99)
+
+ppc_stat_2d(d$y, yrep, stat = c("q95", "q99")) + ggtitle("Prior predicted Q95 vs Q99")
+```
+
+## Model execution and diagnostics
+
+```{r model_execution}
+M_crossed_team_team_repo_model <-
+  brm(data = d,
+      family = zero_inflated_negbinomial,
+      file = ".cache/added/M_crossed_team_team_repo_model",
+      formula = formula,
+      prior = priors,
+      warmup = 1000,
+      iter  = ITERATIONS,
+      chains = CHAINS,
+      cores = CORES,
+      backend="cmdstanr",
+      file_refit = "on_change",
+      threads = threading(THREADS),
+      save_pars = SAVE_PARS,
+      adapt_delta = ADAPT_DELTA)
+
+```
+
+```{r loo}
+M_crossed_team_team_repo_model <- add_criterion(M_crossed_team_team_repo_model, "loo")
+```
+
+```{r}
+m <- M_crossed_team_team_repo_model
+```
+
+
+```{r}
+p <- mcmc_trace(m)
+pars <- levels(p[["data"]][["parameter"]])
+plots <- seq(1, to=length(pars), by=12)
+lapply(plots, function(i) {
+  start <- i
+  end <- start+11
+  mcmc_trace(m, pars = na.omit(pars[start:end]))
+  })
+```
+
+
+```{r}
+rhat(m) |> mcmc_rhat()
+neff_ratio(m) |> mcmc_neff()
+```
+
+
+```{r plot_loo}
+loo <- loo(m)
+loo
+plot(loo)
+```
+There are 6 outlier points that need to be analysed (e.g. with reloo)
+
+```{r, eval=FALSE}
+reloo <- reloo(m, loo, chains=CHAINS)
+reloo
+```
+
+
+
+## Posterior predictive checks
+
+```{r posterior_predict}
+yrep <- posterior_predict(m)
+```
+
+Proportion of zeros
+
+```{r}
+ppc_stat(y = d$y, yrep, stat = function(y) mean(y == 0))
+```
+
+The distribution of zeros are spot-on.
+
+```{r}
+sim_max <- ppc_stat(y = d$y, yrep, stat = "max")
+sim_max
+```
+
+```{r}
+sim_max + scale_x_continuous(limits = c(0,1000))
+```
+
+```{r}
+ppc_stat(y = d$y, yrep, stat = "sd")
+```
+
+
+
+```{r}
+ppc_stat(y = d$y, yrep, stat = function(y) quantile(y, 0.99)) + ggtitle("Posterior predicted Q99 vs. observed value")
+```
+
+
+```{r}
+
+ppc_stat_2d(d$y, yrep, stat = c("q95", "q99")) + ggtitle("Posterior predicted Q95 vs Q99")
+```
+
+
+```{r}
+ppc_stat_grouped(y = d$y, yrep, stat = "max", group = d$team) + ggtitle("Posterior predictive max observation per team")
+```
+
+The Brown team has some wild max values, most likely because they have the top number of introduced duplicates (their 99% quantile in IntTest is 92 duplicates, with maximum of 150, equal to the observed population-level maximum. They also claim the top spot (24 duplicates) in the Mars repo, but in other repos, they are much less likely to add duplicates (only 0-6 maximum introduved duplicates).
+
+```{r}
+ppc_stat_grouped(y = d$y, yrep, stat = "max", group = d$repo) + ggtitle("Posterior predictive max observation per repo")
+```
+
+
+```{r}
+ppc_stat_grouped(y = d$y, yrep, stat = "q99", group = d$team) + ggtitle("Posterior predictive 99% quartile per team")
+```
+
+The 99th percentile value predictions seem very well fitted. Predictions surround the observation nicely.
+
+Note that the model are very uncertain about the predictions related to the UI team (note the large x-axis scale).
+
+```{r}
+ppc_stat_grouped(y = d$y, yrep, stat = "q99", group = d$repo) + ggtitle("Posterior predictive 99% quartile per repo")
+```
+
+For the most repos, the model does a good job of finding the 99th percentile. 
+The Saturn repo has a perfect fit (Q99 in both the data and the model are 2).
+In other repositories, there are some over- and under-estimating, but mostly within +/- 2 issues. 
+The model might be a bit underestimating in the IntTest repo, and very slightly overestimating in Mars and Neptune. 
+
+
+Rootogram, full scale
+
+```{r rootogram, eval=FALSE}
+rootogram <- pp_check(m, type = "rootogram", style="hanging")
+rootogram
+```
+
+Rootogram, sized according to reasonable (observed) values.
+
+```{r, eval=FALSE}
+rootogram + scale_y_continuous(limits=c(0, 35))  + scale_x_continuous(limits=c(0,150))
+```
+
+The rootogram shows model overestimating a bit of the lower number of counts (y axis is $\sqrt{expected}-\sqrt{observed}$, so the model will overestimate some low counts, as all of the differences are positive)
+
+
+## Posterior predictions
+
+The posterior predictions in general work well. Though the single outlier in Saturn is not picked up (as most other changes there yield very few duplicates). Though our priors does allow the outliers to shine though, they do relegate them as very unlikely (most max predictions are in the 10s or 20s, most).
+
+```{r}
+source("predict_utils.R")
+```
+
+```{r}
+heatmap_by_team_and_repo(posterior_predict_by_team_and_repo(m), "percent zeros", decimals=2)
+```
+
+```{r}
+heatmap_by_team_and_repo(posterior_predict_by_team_and_repo(m, added=q95(data$ADD), removed=q95(data$DEL)), "percent zeros", decimals=2)
+```
+
+```{r}
+heatmap_by_team_and_repo(posterior_predict_by_team_and_repo(m, added=q95(data$ADD), removed=q95(data$DEL), summary=function(x) q95(x)), "Quantile 95%", decimals=0)
+```
+
+```{r}
+heatmap_by_team_and_repo(posterior_predict_by_team_and_repo(m, added=q95(data$ADD), removed=q95(data$DEL), summary=function(x) q99(x)), "Quantile 99%", decimals=0)
+```
+
+```{r}
+heatmap_by_team_and_repo(posterior_predict_by_team_and_repo(m, added=q95(data$ADD), removed=q95(data$DEL), complexity=q95(data$COMPLEX), duplicates = q95(data$DUP), summary=function(x) q99(x)), "Quantile 99%", decimals=0)
+```
+
+```{r}
+heatmap_by_team_and_repo(posterior_predict_by_team_and_repo(m, added=q99(data$ADD), removed=q99(data$DEL), complexity=q99(data$COMPLEX), duplicates = q99(data$DUP), summary=function(x) quantile(x, 0.75)), "Quantile 75%", decimals=0)
+```
+
+```{r}
+
+```
+
+```{r}
+summary(m)
+```
+
+
+```{r}
+loo_compare(M_intercepts_only, M_crossed_team_repo_model, M_crossed_team_team_repo_model)
+```
+
+```{r}
+d |> filter(repo == "Saturn") |> group_by(y) |> tally()
+```
+
+```{r}
+d |> filter(repo == "Saturn") |> summarize(q99 = quantile(y, 0.99))
+```
+

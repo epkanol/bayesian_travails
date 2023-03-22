@@ -1,0 +1,487 @@
+---
+title: "PrincipledModelBuilding"
+author: "Anders Sundelin"
+date: "2023-03-09"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(GGally)
+library(tidyr)
+library(dplyr)
+library(brms)
+library(tidybayes)
+library(bayesplot)
+library(patchwork)
+```
+
+```{r}
+set.seed(12345)
+source("ingest_data.R")
+```
+
+# Full model (also including complexity and pre-existing duplicates)
+
+```{r}
+d <- data |> select(y=INTROD,
+                    A=A,
+                    C=C,
+                    D=D,
+                    R=R,
+                    team=committerteam,
+                    repo=repo)
+formula <- bf(y ~ 1 + A + R + C + D + repo + (1 + A + R + C + D + repo | team),
+              zi ~ 1 + A + R)
+get_prior(data=d,
+          family=zero_inflated_negbinomial,
+          formula=formula)
+```
+saved the narrow priors model in .cache/added/M_crossed_team_repo_complex_dup_repo_pop.narrowTeamPrior.rds
+
+```{r}
+priors <- c(prior(normal(0, 0.5), class = Intercept),
+            prior(normal(0, 0.2), class = b),
+            prior(weibull(2, 1), class = sd),
+            prior(weibull(4, 0.25), class = sd, group=team),
+            prior(lkj(2), class = cor),
+            prior(normal(0, 0.5), class = Intercept, dpar=zi),
+            prior(normal(0, 0.2), class = b, dpar=zi),
+            prior(gamma(1, 0.1), class = shape))
+
+wider_priors <- c(prior(normal(0, 0.5), class = Intercept),
+            prior(normal(0, 0.25), class = b),
+            prior(weibull(2, 1), class = sd),
+            prior(weibull(4, 1), class = sd, group=team),
+            prior(lkj(2), class = cor),
+            prior(normal(0, 0.5), class = Intercept, dpar=zi),
+            prior(normal(0, 0.25), class = b, dpar=zi),
+            prior(gamma(1, 0.1), class = shape))
+validate_prior(prior=priors,
+               formula=formula,
+               data=d,
+               family=zero_inflated_negbinomial)
+```
+
+## Prior predictive checks
+
+```{r}
+M_ppc <- brm(data = d,
+      family = zero_inflated_negbinomial,
+      formula = formula,
+      prior = priors,
+      warmup = 1000,
+      iter  = ITERATIONS,
+      chains = CHAINS,
+      cores = CORES,
+      sample_prior = "only",
+      backend="cmdstanr",
+      file_refit = "on_change",
+      threads = threading(THREADS),
+      save_pars = SAVE_PARS,
+      adapt_delta = ADAPT_DELTA)
+```
+
+
+```{r}
+m <- M_ppc
+```
+
+
+```{r prior_predict}
+yrep <- posterior_predict(m)
+```
+
+Proportion of zeros
+
+```{r}
+ppc_stat(y = d$y, yrep, stat = function(y) mean(y == 0))
+```
+
+We had to adapt our priors quite significantly to get some realistic estimates.
+
+```{r}
+sim_max <- ppc_stat(y = d$y, yrep, stat = "max")
+sim_max
+```
+
+```{r}
+sim_max + scale_x_continuous(limits = c(0,1000))
+```
+
+Reducing the scale factor of the group-level standard deviation (meaning expecting less variability amongst the groups) did the trick. Though we are a bit skeptical of finding large values, we still allow up to 1000 duplicates in a single file change with these priors.
+
+Also, we expect the proportion of zeros to be around 75% (the actual data set, with 93% zeros seem very well working).
+
+```{r}
+ppc_stat(y = d$y, yrep, stat = function(y) quantile(y, 0.99)) + ggtitle("Prior predicted Q99 vs. observed value")
+```
+
+
+```{r}
+ppc_stat_2d(d$y, yrep, stat = c("q95", "q99")) + ggtitle("Prior predicted Q95 vs Q99")
+```
+
+The expected 95% and 99% percentiles lie will within our observed value. We allow 99% percentiles of around 60 issues, and 95% percentiles of around 15-20, if these should appear (and more so, if the data would show this behaviour).
+
+If we relax our priors, (e.g. switching to a weibull(4, 0.5) prior, or relaxing the beta coefficients we would get more varied observations). But, for now, we'll keep these, as they seem to generate realistically-looking data.
+
+## Model execution and diagnostics
+
+```{r model_execution}
+M_crossed_team_repo_complex_dup_repo_pop <-
+  brm(data = d,
+      family = zero_inflated_negbinomial,
+      file = ".cache/added/M_crossed_team_repo_complex_dup_repo_pop",
+      formula = formula,
+      prior = priors,
+      warmup = 1000,
+      iter  = ITERATIONS,
+      chains = CHAINS,
+      cores = CORES,
+      backend="cmdstanr",
+      file_refit = "on_change",
+      threads = threading(THREADS),
+      save_pars = SAVE_PARS,
+      adapt_delta = ADAPT_DELTA)
+```
+
+
+```{r loo}
+M_crossed_team_repo_complex_dup_repo_pop <- add_criterion(M_crossed_team_repo_complex_dup_repo_pop, "loo")
+```
+
+```{r}
+m <- M_crossed_team_repo_complex_dup_repo_pop
+```
+
+```{r}
+p <- mcmc_trace(m)
+pars <- levels(p[["data"]][["parameter"]])
+plots <- seq(1, to=length(pars), by=12)
+lapply(plots, function(i) {
+  start <- i
+  end <- start+11
+  mcmc_trace(m, pars = na.omit(pars[start:end]))
+  })
+```
+
+
+```{r}
+rhat(m) |> mcmc_rhat()
+neff_ratio(m) |> mcmc_neff()
+```
+
+
+Both MCMC chains, Rhat and Neff ratio looks good.
+
+```{r plot_loo}
+loo <- loo(m)
+loo
+plot(loo)
+```
+There are 4 outlier points that need to be analysed (e.g. with reloo)
+
+```{r reloo, eval=FALSE}
+reloo <- reloo(m, loo, chains=CHAINS)
+reloo
+```
+
+Performing the reloo takes about 8 hours, and shows that all Pareto k values are OK.
+
+Monte Carlo SE of elpd_loo is 0.3.
+
+Pareto k diagnostic values:
+                         Count Pct.    Min. n_eff
+(-Inf, 0.5]   (good)     30999 100.0%  33        
+ (0.5, 0.7]   (ok)           8   0.0%  137       
+   (0.7, 1]   (bad)          0   0.0%  <NA>      
+   (1, Inf)   (very bad)     0   0.0%  <NA>      
+
+All Pareto k estimates are ok (k < 0.7).
+
+### Posterior predictive checks
+
+```{r posterior_predict}
+yrep <- posterior_predict(m)
+```
+
+Proportion of zeros
+
+```{r}
+ppc_stat(y = d$y, yrep, stat = function(y) mean(y == 0))
+```
+
+
+```{r}
+sim_max <- ppc_stat(y = d$y, yrep, stat = "max")
+sim_max
+```
+
+```{r}
+sim_max + scale_x_continuous(limits = c(0,1000))
+```
+
+```{r}
+ppc_stat(y = d$y, yrep, stat = "sd")
+```
+
+
+```{r}
+ppc_stat(y = d$y, yrep, stat = function(y) quantile(y, 0.99)) + ggtitle("Prior predicted Q99 vs. observed value")
+```
+
+
+```{r}
+ppc_stat_2d(d$y, yrep, stat = c("q95", "q99")) + ggtitle("Prior predicted Q95 vs Q99")
+```
+
+
+```{r}
+ppc_stat_grouped(y = d$y, yrep, stat = "max", group = d$team) + ggtitle("Posterior predictive max observation per team")
+```
+
+The Brown team has some wild max values, most likely because they have some
+
+```{r}
+ppc_stat_grouped(y = d$y, yrep, stat = "max", group = d$repo) + ggtitle("Posterior predictive max observation per repo")
+```
+The Saturn repo max value does not fit into the model expectations. It is actually an extreme outlier (73 duplicates, with the second most duplicate having 8, which would fit perfectly well into the distribution)
+Do note the scale of the IntTest - the model is quite certain that there are many more duplicates introduced in integration tests than in regular production code.
+Neptune repo also has more duplicates, just like in the data.
+
+
+
+```{r}
+ppc_stat_grouped(y = d$y, yrep, stat = "q99", group = d$team) + ggtitle("Posterior predictive 99% quartile per team")
+```
+
+The 99th percentile value predictions seem very well fitted.
+The UI team, which have very little data, have a broader range of plausible 99% values
+
+```{r}
+rootogram <- pp_check(m, type = "rootogram", style="suspended")
+rootogram
+```
+
+```{r}
+rootogram + scale_x_continuous(limits = c(0,500)) + ggtitle("Suspended rootogram beween 0 and 500.")
+```
+
+
+```{r}
+ppc_stat_grouped(y = d$y, yrep, stat = "q99", group = d$repo) + ggtitle("Posterior predictive 99% quartile per repo")
+```
+
+Rootogram, full scale
+
+```{r rootogram, eval=FALSE}
+rootogram <- pp_check(m, type = "rootogram", style="suspended")
+rootogram
+```
+
+Rootogram, sized according to reasonable (observed) values.
+
+```{r, eval=FALSE}
+rootogram + scale_y_continuous(limits=c(0, 35))  + scale_x_continuous(limits=c(0,150))
+```
+
+
+
+```{r}
+d |> filter(repo == "Saturn") |> group_by(y) |> tally()
+```
+```{r}
+d |> filter(repo == "Neptune") |> group_by(y) |> tally()
+
+```
+
+Residuals plot versus A, R, C and D (standardized)
+
+```{r}
+r <- residuals(m) |> data.frame() |> bind_cols(d)
+```
+
+```{r}
+r |> ggplot(aes(x=Estimate, y=A)) + stat_smooth(method = "lm", fullrange = T, color = "firebrick4", fill = "firebrick4", alpha = 1/5, linewidth = 1/2) +
+  geom_vline(xintercept = 0, linetype = 2, color = "grey50") + geom_point(size = 2, color = "firebrick4", alpha = 2/3) + coord_cartesian(xlim = range(r$Estimate)) + labs(x = "Introd duplicates residuals", y = "Added lines (std)") + theme_bw() + theme(panel.grid = element_blank())
+```
+
+```{r}
+r |> ggplot(aes(x=Estimate, y=R)) + stat_smooth(method = "lm", fullrange = T, color = "firebrick4", fill = "firebrick4", alpha = 1/5, linewidth = 1/2) +
+  geom_vline(xintercept = 0, linetype = 2, color = "grey50") + geom_point(size = 2, color = "firebrick4", alpha = 2/3) + coord_cartesian(xlim = range(r$Estimate)) + labs(x = "Introd duplicates residuals", y = "Removed lines (std)") + theme_bw() + theme(panel.grid = element_blank())
+```
+
+```{r}
+r |> ggplot(aes(x=Estimate, y=C)) + stat_smooth(method = "lm", fullrange = T, color = "firebrick4", fill = "firebrick4", alpha = 1/5, linewidth = 1/2) +
+  geom_vline(xintercept = 0, linetype = 2, color = "grey50") + geom_point(size = 2, color = "firebrick4", alpha = 2/3) + geom_pointrange(aes(xmin = Q2.5, xmax = Q97.5), color = "firebrick4", alpha = 2/3) +
+  coord_cartesian(xlim = range(r$Estimate), ylim=range(r$C)) + labs(x = "Introd duplicates residuals", y = "Complexity (std)") + theme_bw() + theme(panel.grid = element_blank())
+```
+
+```{r}
+r |> ggplot(aes(x=Estimate, y=D)) + stat_smooth(method = "lm", fullrange = T, color = "firebrick4", fill = "firebrick4", alpha = 1/5, linewidth = 1/2) +
+  geom_vline(xintercept = 0, linetype = 2, color = "grey50") + geom_point(size = 2, color = "firebrick4", alpha = 2/3) + geom_pointrange(aes(xmin = Q2.5, xmax = Q97.5), color = "firebrick4", alpha = 2/3) +
+  coord_cartesian(xlim = range(r$Estimate), ylim = range(r$D)) + labs(x = "Introd duplicates residuals", y = "Duplicates (std)") + theme_bw() + theme(panel.grid = element_blank())
+
+```
+
+
+
+```{r}
+loo_compare(M_intercepts_only, M_crossed_team_repo_model, M_crossed_team_repo_complex_dup_repo_pop)
+```
+
+The more complex model outperforms the simpler ones by about 6 standard deviations, which is significant.
+
+# Visualizing the posterior
+
+```{r}
+percentage_zeros_by_added_and_removed <- function(model, aTeam, aRepo, complex=0, dup=0) {
+  items <- 5000
+  repos <- data.frame(team=aTeam, repo=aRepo, C=complex, D=dup)
+  as <- data.frame(A=seq(from=min(d$A), to=4, length.out=20))
+  rs <- data.frame(R=seq(from=min(d$R), to=4, length.out=20))
+  grid <- expand_grid(repos, expand_grid(as, rs))
+  perczeros <- posterior_predict(model, newdata=grid, ndraws=items) |> data.frame() |> sapply(function(x) { length(which(x==0))/length(x) } )
+  grid$pct <- perczeros
+  grid$added <- exp(grid$A*sd(data$logADD)+mean(data$logADD))-1
+  grid$removed <- exp(grid$R*sd(data$logDEL)+mean(data$logDEL))-1
+  return(grid)
+}
+
+zero_introductions_by_added_and_removed <- function(postpercentage) {
+  team <- postpercentage |> select(team) |> distinct()
+  repo <- postpercentage |> select(repo) |> distinct()
+  ybreaks <- c(-1, 0, 1, 2, 3, 4)
+  ylabels <- round(exp(ybreaks*sd(data$logDEL)+mean(data$logDEL))-1, 0)
+  xbreaks <- c(-1, 0, 1, 2, 3, 4)
+  xlabels <- round(exp(xbreaks*sd(data$logADD)+mean(data$logADD))-1, 0)
+  postpercentage |> mutate(probDup = 1-pct) |> ggplot(aes(x=A, y=R, fill=probDup)) + geom_tile() + scale_fill_gradient(breaks=c(0, 0.2, 0.4, 0.6, 0.8, 1), low="white", high="black", limits=c(0,1)) + xlab("added") + scale_x_continuous(breaks=xbreaks, labels=xlabels) + ylab("deleted") +  scale_y_continuous(breaks=ybreaks, labels=ylabels) + ggtitle(paste0("Probability of team ", team, " introducing duplicates in ", repo))
+}
+```
+
+```{r}
+pp <- percentage_zeros_by_added_and_removed(m, "Arch", "Neptune")
+zero_introductions_by_added_and_removed(pp)
+```
+
+```{r}
+lapply(teams, function(t) zero_introductions_by_added_and_removed(percentage_zeros_by_added_and_removed(m, t, "Neptune")))
+```
+
+```{r}
+lapply(teams, function(t) zero_introductions_by_added_and_removed(percentage_zeros_by_added_and_removed(m, t, "Neptune", complex=2, dup=2)))
+```
+
+```{r}
+lapply(teams, function(t) zero_introductions_by_added_and_removed(percentage_zeros_by_added_and_removed(m, t, "IntTest", complex=2, dup=2)))
+
+```
+
+### Counterfactual plots
+
+```{r}
+arch <- condeffect_logADD_by_logCOMPLEX(m, d, "Arch", "Neptune")
+```
+```{r}
+plot_logADD_by_logCOMPLEX(m, d, arch, "Arch", "Neptune")
+```
+The Architecture team does not seem much affected by the complexity of the file. The model keeps all the expected values close by, and the confidence intervals all overlap to a large extent.
+
+```{r}
+brown <- condeffect_logADD_by_logCOMPLEX(m, d, "Brown", "Neptune")
+```
+```{r}
+p <- plot_logADD_by_logCOMPLEX(m, d, brown, "Brown", "Neptune")
+p
+```
+
+The Brown team, on the other hand, is expected to introduce much more duplicates - especially when adding a large number of lines. But no such observations have been found in the Neptune repo. What is causing the model to believe this?
+
+```{r}
+p + scale_x_continuous(limits = c(-1.5, 3)) + scale_y_continuous(limits = c(0,110))
+```
+
+
+```{r}
+d |> filter(team=="Brown", repo == "Neptune") |> group_by(y) |> tally()
+```
+
+So, the most number of duplicates that Brown was introducing into the Neptune repo was 3. And yet the model predicts that once many lines are added, the number of duplicates will explode. Too little variation among the repos, perhaps? (we did have quite narrow standard deviation priors)
+
+
+```{r}
+d |> filter(team=="Brown", y > 10) |> group_by(repo, y) |> tally()
+```
+
+So, we see that the Brown team has made quite a few additions in the IntTest repo, where several hundred duplicates were introduced.
+
+
+### IntTest
+
+```{r}
+arch <- condeffect_logADD_by_logCOMPLEX(m, d, "Arch", "IntTest")
+```
+```{r}
+plot_logADD_by_logCOMPLEX(m, d, arch, "Arch", "IntTest")
+```
+
+
+```{r}
+brown <- condeffect_logADD_by_logCOMPLEX(m, d, "Brown", "IntTest")
+```
+```{r}
+plot_logADD_by_logCOMPLEX(m, d, brown, "Brown", "IntTest") #+ scale_x_continuous(limits = c(-1.5, 3)) + scale_y_continuous(limits = c(0,110))
+```
+
+
+### Saturn
+
+```{r}
+arch <- condeffect_logADD_by_logCOMPLEX(m, d, "Arch", "Saturn")
+```
+```{r}
+plot_logADD_by_logCOMPLEX(m, d, arch, "Arch", "Saturn")
+```
+
+
+
+```{r}
+brown <- condeffect_logADD_by_logCOMPLEX(m, d, "Brown", "Saturn")
+```
+```{r}
+plot_logADD_by_logCOMPLEX(m, d, brown, "Brown", "Saturn") #+ scale_x_continuous(limits = c(-1.5, 3)) + scale_y_continuous(limits = c(0,110))
+```
+
+
+
+## Model parameters
+
+
+```{r}
+summary(m)
+```
+
+```{r}
+ranef(m)
+```
+
+```{r}
+mcmc_areas(m, regex_pars = c("^b_"))
+```
+
+```{r}
+mcmc_areas(m, regex_pars = c("^sd_"))
+```
+```{r}
+params <- c("Intercept", "A", "R", "C", "D")
+lapply(params, function(p) mcmc_areas(m, regex_pars = paste0("^cor_team.*__", p, "__")) + ggtitle(paste("Correlations affecting parameter", p)))
+```
+
+
+```{r}
+lapply(params, function(p) mcmc_areas(m, regex_pars = paste0("^r_team.*", p, "[]]")) + ggtitle(paste("Team-level adjustments to parameter", p)))
+```
+
+The above models all work on the presumption that it is the team that is the grouping factor, and the repo decides the offset from the intercept. That is, all teams have the same behaviour, it is just the offset that varies per repo

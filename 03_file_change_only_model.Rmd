@@ -1,0 +1,270 @@
+---
+title: "03 File-chanbge-only model"
+author: "Anders Sundelin"
+date: "2023-03-09"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(GGally)
+library(tidyr)
+library(dplyr)
+library(brms)
+library(tidybayes)
+library(bayesplot)
+library(patchwork)
+```
+
+```{r}
+set.seed(12345)
+source("ingest_data.R")
+```
+
+# File-change-only model (added & removed lines)
+
+Our next try at a model is to add some linear predictors to the model. Logically thinking, the probability of introducing duplicates should be related to the size of the change (positive for added lines, but perhaps zero or negative for removed lines).
+Because we saw some differences between both teams and repositories, we will add the predictors also to the team group.
+In case there are no changes between teams, these coefficients should be located around zero.
+
+Note that because we make repo a proper factor here, rather than a grouping factor, we are constrained to make predictions in the existing (model-aware) repos. We cannot make any inferences in new repos that may come our way (even though the team may be very well-known...)
+
+```{r}
+d <- data |> select(y=INTROD,
+                    A=A,
+                    R=R,
+                    team=committerteam,
+                    repo=repo)
+formula <- bf(y ~ 1 + A + R + repo + (1 + A + R + repo | team),
+              zi ~ 1 + A + R)
+get_prior(data=d,
+          family=zero_inflated_negbinomial,
+          formula=formula)
+```
+```{r}
+priors <- c(prior(normal(0, 0.25), class = Intercept),
+            prior(normal(0, 0.10), class = b),
+            prior(weibull(2, 1), class = sd),
+            prior(weibull(4, 0.5), class = sd, group=team),
+            prior(lkj(2), class = cor),
+            prior(normal(0, 0.5), class = Intercept, dpar=zi),
+            prior(normal(0, 0.25), class = b, dpar=zi),
+            prior(gamma(1, 0.1), class = shape))
+validate_prior(prior=priors,
+               formula=formula,
+               data=d,
+               family=zero_inflated_negbinomial)
+```
+
+## Prior predictive checks
+
+
+```{r}
+M_ppc <- brm(data = d,
+      family = zero_inflated_negbinomial,
+      formula = formula,
+      prior = priors,
+      warmup = 1000,
+      iter  = ITERATIONS,
+      chains = CHAINS,
+      cores = CORES,
+      sample_prior = "only",
+      backend="cmdstanr",
+      file_refit = "on_change",
+      threads = threading(THREADS),
+      save_pars = SAVE_PARS,
+      adapt_delta = ADAPT_DELTA)
+```
+
+```{r}
+m <- M_ppc
+```
+
+
+```{r prior_predict}
+yrep <- posterior_predict(m)
+```
+
+Proportion of zeros
+
+```{r}
+ppc_stat(y = d$y, yrep, stat = function(y) mean(y == 0))
+```
+
+We had to adapt our priors quite significantly to get some realistic estimates.
+
+```{r}
+sim_max <- ppc_stat(y = d$y, yrep, stat = "max")
+sim_max
+```
+```{r}
+sim_max + scale_x_continuous(limits = c(0,1000))
+```
+
+
+```{r}
+ppc_stat(y = d$y, yrep, stat = function(y) quantile(y, 0.99)) + ggtitle("Prior predicted Q99 vs. observed value")
+```
+
+
+```{r}
+q95 <- function(y) quantile(y, 0.95)
+q99 <- function(y) quantile(y, 0.99)
+
+ppc_stat_2d(d$y, yrep, stat = c("q95", "q99")) + ggtitle("Prior predicted Q95 vs Q99")
+```
+
+So, while our 95% and 99% quantiles are somewhat greater than the observed value, they are not unreasonably large.
+It seems like our priors will let our data shine through - though the variation among groups will be tempered by the narrower standard deviation priors for the teams group.
+
+## Model execution and diagnostics
+
+```{r model_execution}
+M_crossed_team_repo_model <-
+  brm(data = d,
+      family = zero_inflated_negbinomial,
+      file = ".cache/added/M_crossed_team_repo_model",
+      formula = formula,
+      prior = priors,
+      warmup = 1000,
+      iter  = ITERATIONS,
+      chains = CHAINS,
+      cores = CORES,
+      backend="cmdstanr",
+      file_refit = "on_change",
+      threads = threading(THREADS),
+      save_pars = SAVE_PARS,
+      adapt_delta = ADAPT_DELTA)
+
+```
+
+```{r loo}
+M_crossed_team_repo_model <- add_criterion(M_crossed_team_repo_model, "loo")
+```
+
+```{r}
+m <- M_crossed_team_repo_model
+```
+
+
+```{r}
+p <- mcmc_trace(m)
+pars <- levels(p[["data"]][["parameter"]])
+plots <- seq(1, to=length(pars), by=12)
+lapply(plots, function(i) {
+  start <- i
+  end <- start+11
+  mcmc_trace(m, pars = na.omit(pars[start:end]))
+  })
+```
+
+
+```{r}
+rhat(m) |> mcmc_rhat()
+neff_ratio(m) |> mcmc_neff()
+```
+
+Both MCMC chains, Rhat and Neff ratio looks good.
+
+```{r plot_loo}
+loo <- loo(m)
+loo
+plot(loo)
+```
+There are 5 outlier points that need to be analysed (e.g. with reloo)
+
+```{r reloo, eval=FALSE}
+reloo <- reloo(m, loo, chains=CHAINS)
+reloo
+```
+
+
+
+## Posterior predictive checks
+
+```{r posterior_predict}
+yrep <- posterior_predict(m)
+```
+
+Proportion of zeros
+
+```{r}
+ppc_stat(y = d$y, yrep, stat = function(y) mean(y == 0))
+```
+
+The distribution of zeros are spot-on.
+
+```{r}
+sim_max <- ppc_stat(y = d$y, yrep, stat = "max")
+sim_max
+```
+
+```{r}
+sim_max + scale_x_continuous(limits = c(0,1000))
+```
+
+```{r}
+ppc_stat(y = d$y, yrep, stat = "sd")
+```
+
+
+
+```{r}
+ppc_stat(y = d$y, yrep, stat = function(y) quantile(y, 0.99)) + ggtitle("Posterior predicted Q99 vs. observed value")
+```
+
+
+```{r}
+
+ppc_stat_2d(d$y, yrep, stat = c("q95", "q99")) + ggtitle("Posterior predicted Q95 vs Q99")
+```
+
+```{r}
+quantile(d$y, 0.999)
+```
+
+As we see, both point estimates (Q95 and Q99) and variability estimates (sd) of the model match the corresponding observational data.
+
+```{r}
+ppc_stat_grouped(y = d$y, yrep, stat = "max", group = d$team) + ggtitle("Posterior predictive max observation per team")
+```
+
+The Brown team has some wild max values, most likely because they have some
+
+```{r}
+ppc_stat_grouped(y = d$y, yrep, stat = "max", group = d$repo) + ggtitle("Posterior predictive max observation per repo")
+```
+
+
+```{r}
+ppc_stat_grouped(y = d$y, yrep, stat = "q99", group = d$team) + ggtitle("Posterior predictive 99% quartile per team")
+```
+
+The 99th percentile value predictions seem very well fitted. Predictions surround the observation nicely.
+
+```{r}
+ppc_stat_grouped(y = d$y, yrep, stat = "q99", group = d$repo) + ggtitle("Posterior predictive 99% quartile per repo")
+```
+
+The posterior predictions in general work well. Though the single outlier in Saturn is not picked up (as most other changes there yield very few duplicates). Though our priors does allow the outliers to shine though, they do relegate them as very unlikely (most max predictions are in the 10s or 20s, most).
+
+```{r}
+source("predict_utils.R")
+```
+
+```{r}
+heatmap_by_team_and_repo(posterior_predict_by_team_and_repo(m), "percent zeros", decimals=2)
+```
+
+```{r}
+heatmap_by_team_and_repo(posterior_predict_by_team_and_repo(m, added=q95(data$ADD), removed=q95(data$DEL)), "percent zeros", decimals=2)
+```
+
+```{r}
+heatmap_by_team_and_repo(posterior_predict_by_team_and_repo(m, added=q95(data$ADD), removed=q95(data$DEL), summary=function(x) q95(x)), "Quantile 95%", decimals=0)
+```
+
+```{r}
+heatmap_by_team_and_repo(posterior_predict_by_team_and_repo(m, added=q95(data$ADD), removed=q95(data$DEL), summary=function(x) q99(x)), "Quantile 99%", decimals=0)
+```
