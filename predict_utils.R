@@ -43,3 +43,63 @@ heatmap_by_team_and_repo <- function(postpredict, summation, decimals=2) {
     ggtitle(paste(summation, "by team and repo"), paste0("added: ", round(added$added, 0), " removed: ", round(removed$removed, 0), " complexity: ", round(complexity$complexity, 0), " duplicates: ", round(duplicates$duplicates, 0)))
   return(p)
 }
+
+predict_for_team <- function(model, team, repo, 
+                             added=exp(mean(data$logADD))-1,
+                             removed=exp(mean(data$logDEL))-1,
+                             complexity=exp(mean(data$logCOMPLEX))-1,
+                             duplicates=exp(mean(data$logDUP))-1) {
+  numbers <- data.frame(A=(log(added+1)-mean(data$logADD))/sd(data$logADD),
+                        R=(log(removed+1)-mean(data$logDEL))/sd(data$logDEL),
+                        C=(log(complexity+1)-mean(data$logCOMPLEX))/sd(data$logCOMPLEX),
+                        D=(log(duplicates+1)-mean(data$logDUP))/sd(data$logDUP),
+                        added=added,
+                        removed=removed,
+                        complexity=complexity,
+                        duplicates=duplicates)
+  grid <- expand_grid(numbers, repo, team)
+  items <- 10000
+#  data <- posterior_predict(model, newdata=grid, ndraws=items, allow_new_levels=TRUE) |> data.frame()
+  data <- predicted_draws(model, newdata=grid, ndraws=items, allow_new_levels = TRUE ) |> data.frame()
+  return(data)
+}
+
+# input is the output from predict_for_team
+plot_cumulative_prob_of_duplicates <- function(predictions) {
+  added <- predictions |> select(added) |> distinct()
+  removed <- predictions |> select(removed) |> distinct()
+  complexity <- predictions |> select(complexity) |> distinct()
+  duplicates <- predictions |> select(duplicates) |> distinct()
+  predictions |> mutate(predict_INTROD = .prediction) |> group_by(team, repo, predict_INTROD) |> ggplot(aes(x=predict_INTROD, color=team)) + stat_ecdf() + facet_wrap(~ repo) + 
+    xlab("Maximum number of introduced duplicates") +
+    ggtitle("Cumulative probability of introduced duplicates",  
+            paste0("added: ", round(added$added, 0), " removed: ", round(removed$removed, 0), " complexity: ", round(complexity$complexity, 0), " duplicates: ", round(duplicates$duplicates, 0))) +
+    scale_color_manual(values=COLOR_BY_TEAM) + theme_bw()
+}
+
+
+halfeye_per_team <- function(postpredict) {
+  added <- postpredict |> select(added) |> distinct()
+  removed <- postpredict |> select(removed) |> distinct()
+  complexity <- postpredict |> select(complexity) |> distinct()
+  duplicates <- postpredict |> select(duplicates) |> distinct()
+  p <- postpredict |> group_by(team, repo) |> ggplot(aes(x=.prediction, color=repo)) + 
+    stat_halfeye(fill="black") + facet_wrap(~ team) +
+    ggtitle(paste("Prediction by team"), paste0("added: ", round(added$added, 0), " removed: ", round(removed$removed, 0), " complexity: ", round(complexity$complexity, 0), " duplicates: ", round(duplicates$duplicates, 0)))
+  
+  return (p)
+}
+
+histogram_per_team <- function(postpredict) {
+  added <- postpredict |> select(added) |> distinct()
+  removed <- postpredict |> select(removed) |> distinct()
+  complexity <- postpredict |> select(complexity) |> distinct()
+  duplicates <- postpredict |> select(duplicates) |> distinct()
+  p <- postpredict |> group_by(team, repo) |> ggplot(aes(x=.prediction, color=repo)) + 
+    geom_histogram(binwidth = 1) + facet_wrap(~ team) +
+    ggtitle(paste("Prediction by team"), paste0("added: ", round(added$added, 0), " removed: ", round(removed$removed, 0), " complexity: ", round(complexity$complexity, 0), " duplicates: ", round(duplicates$duplicates, 0)))
+  
+  return (p)
+}
+
+
