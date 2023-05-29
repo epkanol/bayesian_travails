@@ -34,8 +34,8 @@ As we are more interesting in predicting the rate of introducing duplicates, we 
 d <- data |> select(y=INTROD,
                     team=committerteam,
                     repo=repo)
-formula <- bf(y ~ 1 + repo + (1 | team),
-              zi ~ 1 )
+formula <- bf(y ~ 1 + (1 | team) + (1 | team:repo),
+              zi ~ 1 + (1 | team) + (1 | team:repo))
 get_prior(data=d,
           family=zero_inflated_negbinomial,
           formula=formula)
@@ -43,10 +43,10 @@ get_prior(data=d,
 
 ```{r}
 priors <- c(prior(normal(0, 0.5), class = Intercept),
-            prior(normal(0, 0.25), class = b),
-            prior(weibull(2, 1), class = sd),
+            prior(weibull(2, .75), class = sd),
             prior(normal(0, 0.5), class = Intercept, dpar=zi),
-            prior(gamma(1, 0.1), class = shape))
+            prior(weibull(2, 1), class = sd, dpar=zi),
+            prior(gamma(1, 0.5), class = shape))
 validate_prior(prior=priors,
                formula=formula,
                data=d,
@@ -105,17 +105,17 @@ sim_max + scale_x_continuous(limits = c(0,1000))
 ```
 
 
-Rootogram, full scale
+Rootogram does not work for this set or priors, unfortunately. R runs out of memory before the rootogram completes. Probably some chains do not converge appropriately.
 
 ```{r rootogram, eval=FALSE}
-rootogram <- pp_check(m, type = "rootogram", style="suspended")
+rootogram <- ppc_rootogram(y = d$y, yrep, style="suspended")
 rootogram
 ```
 
 Rootogram, sized according to reasonable (observed) values.
 
 ```{r, eval=FALSE}
-rootogram + scale_y_continuous(limits=c(0, 35))  + scale_x_continuous(limits=c(0,150))
+rootogram + scale_x_continuous(limits=c(0,50))
 ```
 
 The rootogram indicates that we overestimate the number of observed duplicates - possibly because of our zero-inflation estimated around 0.75, rather than the observed ~0.95. While the maximum observed outcome is large (about 50k), it is no longer unreasonably large, as it was with the default shape prior.
@@ -146,9 +146,9 @@ M_intercepts_only <- add_criterion(M_intercepts_only, criterion = "loo")
 m <- M_intercepts_only
 ```
 
-We have 2 observations with high Pareto k values. Most likely due to sparse data for some observations.
+We have 6 observations with high Pareto k values. Most likely due to sparse data for some observations.
 
-We can do a more exact Pareto calculation by refitting the model 7 times, each time excluding one of the problematic observations.
+We can do a more exact Pareto calculation by refitting the model 6 times, each time excluding one of the problematic observations.
 If these calculations produce reasonable Pareto values (< 0.7), then we can still trust the results.
 
 ```{r, eval=FALSE}
@@ -188,12 +188,29 @@ loo
 plot(loo)
 ```
 
-Two outlier values (possibly solved by reloo)
+Six outlier values (possibly solved by reloo)
+
+TODO reloo
+```{r}
+
+```
+
 
 ## Posterior predictive checks
 
 ```{r posterior_predict}
 yrep <- posterior_predict(m)
+```
+
+```{r rootogram}
+rootogram <- ppc_rootogram(y = d$y, yrep, style="suspended")
+rootogram
+```
+
+Rootogram, sized according to reasonable (observed) values.
+
+```{r}
+rootogram + scale_x_continuous(limits=c(0,50))
 ```
 
 Proportion of zeros
@@ -217,9 +234,6 @@ ppc_stat(y = d$y, yrep, stat = "sd")
 
 
 ```{r}
-q95 <- function(y) quantile(y, 0.95)
-q99 <- function(y) quantile(y, 0.99)
-
 ppc_stat_2d(d$y, yrep, stat = c("q95", "q99")) + ggtitle("Posterior predicted Q95 vs Q99")
 ```
 
@@ -240,6 +254,15 @@ ppc_stat_grouped(y = d$y, yrep, stat = "q99", group = d$team) + ggtitle("Posteri
 ```{r}
 ppc_stat_grouped(y = d$y, yrep, stat = "q99", group = d$repo) + ggtitle("Posterior predictive 99% quartile per repo")
 ```
+
+
+```{r}
+heatmap_by_team_and_repo(posterior_predict_by_team_and_repo(m, added=q95(data$ADD), removed=q95(data$DEL), complexity=q95(data$COMPLEX), duplicates = q95(data$DUP), summary=function(x) q99(x)), "Quantile 99%", decimals=0)
+```
+```{r}
+
+```
+
 
 
 ## Conclusion
