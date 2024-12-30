@@ -1,5 +1,5 @@
 ---
-title: "ZeroInflatedPoisson"
+title: "SimulatingZeroInflatedNegBinomial"
 author: "Anders Sundelin"
 date: "2022-10-18"
 output: html_document
@@ -10,6 +10,10 @@ knitr::opts_chunk$set(echo = TRUE)
 library(ggplot2)
 library(dplyr)
 library(boot)
+library(brms)
+library(tidybayes)
+library(bayesplot)
+
 ```
 
 ```{r}
@@ -332,9 +336,6 @@ The other parameters, $\hat{\mu_\alpha}$ and $\hat{\sigma_\alpha}$, et al. are j
 ## Recovering the model parameters
 
 ```{r}
-library(brms)
-library(tidybayes)
-library(bayesplot)
 ```
 
 Argumenting for the priors:
@@ -368,16 +369,17 @@ On my laptop, this takes about 12 minutes to sample, so pur yourself a nice beve
 ```{r}
 M_recover_params <- brm(data=d,
                         family=zero_inflated_negbinomial,
-                        formula=bf(y ~ 1 + logADD + logDUP + logCOMPLEX + (1 | team/repo),
+                        formula=bf(y ~ 1 + logADD + logDUP + logCOMPLEX + (1 + logADD | team/repo),
                                    zi ~ 1 + logADD),
                         prior = c(prior(normal(0, 0.5), class = Intercept),
                                   prior(normal(0, 0.25), class = b),
-                                  prior(weibull(2, 1), class = sd),
-                                  prior(weibull(2, 1), class = sd, group=team:repo),
-                                  prior(weibull(2, 1), class = sd, group=team),
+                                  prior(weibull(2, 0.25), class = sd),
+                                  prior(weibull(2, 0.25), class = sd, group=team:repo),
+                                  prior(weibull(2, 0.25), class = sd, group=team),
+                                  prior(lkj(2), class = cor),
                                   prior(normal(0, 0.5), class = Intercept, dpar=zi),
-                                  prior(normal(0.5, 0.5), class = b, dpar=zi),
-                                  prior(gamma(1, 0.1), class = shape)),
+                                  prior(normal(0, 0.5), class = b, dpar=zi),
+                                  prior(gamma(0.1, 0.1), class = shape)),
                         warmup=1000,
                         iter=4000,
                         chains=CHAINS,

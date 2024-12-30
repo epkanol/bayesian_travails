@@ -133,7 +133,7 @@ If we relax our priors, (e.g. switching to a weibull(4, 0.5) prior, or relaxing 
 M_crossed_team_repo_complex_dup_repo_pop <-
   brm(data = d,
       family = zero_inflated_negbinomial,
-      file = ".cache/added/M_crossed_team_repo_complex_dup_repo_pop",
+      file = ".cache/added-M_crossed_team_repo_complex_dup_repo_pop",
       formula = formula,
       prior = priors,
       warmup = 1000,

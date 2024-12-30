@@ -1,0 +1,61 @@
+---
+title: "Overview"
+author: "Anders Sundelin"
+date: "2023-10-15"
+output: html_document
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## List of documents
+
+* [Embedded Shiny doc](embedded_shiny.Rmd)
+* [Original simulation](simulated_zinb_get_priors.Rmd)
+* [EDA in plain RMarkdown](EDA_nonobfuscated.Rmd)
+* Prior selection (expect around 4-6 minutes per page to generate)
+    * [M2 prior selection, part 1](M2_prior_selection-1.Rmd)
+    * [M2 prior selection, part 2](M2_prior_selection-2.Rmd)
+    * [M2 prior selection, part 3](M2_prior_selection-3.Rmd)
+    * [M2 prior selection, part 4](M2_prior_selection-4.Rmd)
+    * [M2 prior selection, part 5](M2_prior_selection-5.Rmd)
+    * [M2 prior selection, part 5b](M2_prior_selection-5b.Rmd)
+    * [M2 prior selection, part 6](M2_prior_selection-6.Rmd)
+    * [M2 prior selection, part 7](M2_prior_selection-7.Rmd)
+* [Truncated model](12_truncated.Rmd)
+    * [Only model fit](12_fit_truncated.Rmd)
+    * [Check cache](12_check_cache_truncated.Rmd)
+* [Final model](12_fullModel_shiny.Rmd)
+
+
+## Rest is the remplate
+This R Markdown document is made interactive using Shiny. Unlike the more traditional workflow of creating static reports, you can now create documents that allow your readers to change the assumptions underlying your analysis and see the results immediately. 
+
+To learn more, see [Interactive Documents](http://rmarkdown.rstudio.com/authoring_shiny.html).
+
+## Inputs and Outputs
+
+You can embed Shiny inputs and outputs in your document. Outputs are automatically updated whenever inputs change.  This demonstrates how a standard R plot can be made interactive by wrapping it in the Shiny `renderPlot` function. The `selectInput` and `sliderInput` functions create the input widgets used to drive the plot.
+
+```{r eruptions, echo=FALSE}
+inputPanel(
+  selectInput("n_breaks", label = "Number of bins:",
+              choices = c(10, 20, 35, 50), selected = 20),
+  
+  sliderInput("bw_adjust", label = "Bandwidth adjustment:",
+              min = 0.2, max = 2, value = 1, step = 0.2)
+)
+
+renderPlot({
+  hist(faithful$eruptions, probability = TRUE, breaks = as.numeric(input$n_breaks),
+       xlab = "Duration (minutes)", main = "Geyser eruption duration")
+  
+  dens <- density(faithful$eruptions, adjust = input$bw_adjust)
+  lines(dens, col = "blue")
+})
+```
+
+
+

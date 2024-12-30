@@ -47,6 +47,12 @@ priors <- c(prior(normal(0, 0.5), class = Intercept),
             prior(normal(0, 0.5), class = Intercept, dpar=zi),
             prior(weibull(2, 1), class = sd, dpar=zi),
             prior(gamma(1, 0.5), class = shape))
+priors <- c(prior(normal(0, 0.5), class = Intercept),
+            prior(weibull(2, .25), class = sd),
+            prior(normal(0, 0.5), class = Intercept, dpar=zi),
+            prior(weibull(2, 0.25), class = sd, dpar=zi),
+            prior(gamma(0.1, 0.1), class = shape))
+
 validate_prior(prior=priors,
                formula=formula,
                data=d,
@@ -124,7 +130,7 @@ The rootogram indicates that we overestimate the number of observed duplicates -
 M_intercepts_only <-
   brm(data = d,
       family = zero_inflated_negbinomial,
-      file = ".cache/added/M_intercepts_only",
+      file = ".cache/added-M_intercepts_only",
       formula = formula,
       prior = priors,
       warmup = 1000,

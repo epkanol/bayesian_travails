@@ -147,7 +147,7 @@ ppc_stat_grouped(y = d$y, yrep, stat = "q99", group = d$repo) + ggtitle("Prior p
 M_crossed_team_team_repo_zi_model <-
   brm(data = d,
       family = zero_inflated_negbinomial,
-      file = ".cache/added/M_crossed_team_team_repo_zi_model",
+      file = ".cache/added-M_crossed_team_team_repo_zi_model",
       formula = formula,
       prior = priors,
       warmup = 1000,
@@ -647,6 +647,15 @@ Q95 change in a highly complex file
 figsave("predicted_q95.pdf", p)
 ```
 
+## Letting the teams work in new repo
+```{r}
+(p <- plot_cumulative_prob_of_duplicates(predict_for_team(m, c("Arch", "Blue", "Red", "NewTeam", "Green"), repo=c("Aniara", "Jupiter", "IntTest"), added=q95(data$ADD), removed=q95(data$DEL), duplicates=q95(data$DUP), complex=q95(data$COMPLEX))) + scale_y_continuous(limits = c(0.30,1.0)) + scale_x_continuous(limits = c(0,30)))
+```
+```{r}
+figsave("predicted_q95_aniara_m06.pdf", p)
+
+```
+
 ```{r}
 (p <- plot_cumulative_prob_of_duplicates(predict_for_team(m, c("Arch", "Blue", "Red", "NewTeam", "Green"), repo=c("Uranus", "Jupiter", "IntTest"), added=q95(data$ADD), removed=q95(data$DEL), duplicates=median(data$DUP), complex=median(data$COMPLEX))) + scale_y_continuous(limits = c(0.70,1.0)) + scale_x_continuous(limits = c(0,30)))
 ```
@@ -711,7 +720,7 @@ plot_cumulative_prob_of_duplicates(predict_for_team(m, c("Arch", "Blue", "Brown"
 ```{r}
 # bringing in the more volatile teams will impact the stddev of the predictions, will will screw up the ranking...
 ALL_TEAMS = c("Arch", "Blue", "Brown","Red", "Green", "Yellow", "Orange", "NewTeam", "Pink", "UI", "Violet")
-ALL_TEAMS = c("Arch", "Blue", "Brown","Red", "Green", "Yellow", "Orange", "NewTeam")
+#ALL_TEAMS = c("Arch", "Blue", "Brown","Red", "Green", "Yellow", "Orange", "NewTeam")
 ```
 
 ```{r}
@@ -719,10 +728,35 @@ onepred <- function(added=q99(data$ADD), removed=q99(data$DEL), complexity = q95
     pred <- predict_for_team(m, teams, repo=c("Venus", "Jupiter", "IntTest", "Mars", "Neptune", "Saturn", "Uranus", "Mercury"), 
                             added, removed, complexity, duplicates)
     # assumes we know that total number of n is 10000 (hence the n/100) - should really calculate this instead...
-    p0 <- pred |> group_by(added, removed, complexity, duplicates, team, repo, .prediction) |> summarize(n = n()) |> filter(.prediction == 0) |> summarize(pred0=100-(n/100))
-    p5 <- pred |> group_by(added, removed, complexity, duplicates, team, repo, .prediction) |> summarize(n = n()) |> filter(.prediction < 6 ) |> summarize(pred5=100-(sum(n)/100))
+    p0 <- pred |> group_by(added, removed, complexity, duplicates, team, repo, .prediction) |> summarize(n = n()) |> filter(.prediction == 0) |> summarize(pred0=100-(n/100)) |> ungroup() |> group_by(repo) |> mutate(rank0 = rank(pred0, ties.method = "min"))
+    p5 <- pred |> group_by(added, removed, complexity, duplicates, team, repo, .prediction) |> summarize(n = n()) |> filter(.prediction < 6 ) |> summarize(pred5=100-(sum(n)/100)) |> ungroup() |> group_by(repo) |> mutate(rank5 = rank(pred5, ties.method = "min"))
     merge(p0,p5) 
 }
+```
+
+```{r}
+foo <- rep(1:50) |> lapply(function(i) cbind(onepred(added=median(data$ADD), removed=median(data$DEL), complexity = q95(data$COMPLEX), duplicates=q95(data$DUP), teams=ALL_TEAMS), i)) |> bind_rows()
+```
+```{r}
+foo |> filter(repo == "IntTest")
+```
+
+
+```{r}
+foorank <- foo |> group_by(repo, team, rank0) |>  tally() |> arrange(repo, rank0, desc(n))
+saveRDS(foorank, "foorank.rds")
+```
+
+```{r}
+source("debug_rank.R")
+```
+```{r}
+find_rank(1, foo |> group_by(repo, team, rank5) |> tally() |> filter(repo == "Mars") |> mutate(rank=rank5), 11)
+```
+
+
+```{r}
+foorank |> group_by(repo)
 ```
 
 
@@ -950,6 +984,10 @@ pred |> group_by(team, repo) |> summarize(mean0 = mean(pred0), sd0 = sd(pred0), 
 ```{r}
 pred <- predict_for_team(m, c("Arch", "Blue", "Brown","Red", "Green", "Yellow", "Orange", "NewTeam"), repo=c("Venus", "Jupiter", "IntTest"), added=q99(data$ADD), removed=q99(data$DEL), complexity = median(data$COMPLEX), duplicates=median(data$DUP))
 
+```
+
+```{r}
+pred |> group_by(team, repo, .prediction) |> tally()
 ```
 
 

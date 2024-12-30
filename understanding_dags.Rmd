@@ -8,7 +8,9 @@ output: html_document
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 library(dagitty)
-library(rethinking)
+library(ggdag)
+library(ggplot2)
+#library(rethinking)
 ```
 
 # Getting down to DAGs
@@ -390,5 +392,469 @@ But it seems unlikely that REASON would impact ADDED lines without first going t
 
 ```{r}
 adjustmentSets(introd.dag.8, exposure = "REPO", outcome = "INTROD", effect = "direct")
+```
+
+### New causal model
+
+```{r}
+testImplications <- function( covariance.matrix, sample.size ){
+	library(ggm)
+	tst <- function(i){ pcor.test( pcor(i,covariance.matrix), length(i)-2, sample.size )$pvalue }
+tos <- function(i){ paste(i,collapse=" ") }
+implications <- list(c("COMPLEX","FEEDBACK"),
+		c("COMPLEX","REQ"),
+		c("COMPLEX","NCOMMITS"),
+		c("DUP","FEEDBACK"),
+		c("DUP","REQ"),
+		c("DUP","NCOMMITS"),
+		c("FEEDBACK","INTROD","ADD","COMPLEX","DEL","DUP"),
+		c("FEEDBACK","REQ"),
+		c("FEEDBACK","TEAM_REPO"),
+		c("FEEDBACK","NCOMMITS"),
+		c("INTROD","REQ","DUP","COMPLEX","DEL","ADD"),
+		c("INTROD","TEAM_REPO","DEL","ADD","DUP","COMPLEX"),
+		c("INTROD","NCOMMITS","DUP","COMPLEX","DEL","ADD"),
+		c("REQ","TEAM_REPO"),
+		c("REQ","NCOMMITS"),
+		c("TEAM_REPO","NCOMMITS"))
+	data.frame( implication=unlist(lapply(implications,tos)),
+		pvalue=unlist( lapply( implications, tst ) ) )
+
+}
+
+introd.dag.9 <- dagitty("dag {
+bb=\"-4.944,-4.291,4.847,5.173\"
+ADD [pos=\"0.918,-0.890\"]
+CARE [latent,pos=\"-2.168,0.674\"]
+COMPLEX [pos=\"-2.590,-1.081\"]
+DEL [pos=\"-1.062,-0.699\"]
+DUP [pos=\"-1.826,-0.777\"]
+EXP [latent,pos=\"-1.215,0.787\"]
+FEEDBACK [pos=\"1.355,0.179\"]
+INTROD [outcome,pos=\"-0.995,-2.778\"]
+KNOW [latent,pos=\"0.428,0.919\"]
+NCOMMITS [pos=\"1.165,1.326\"]
+REQ [pos=\"0.923,-1.885\"]
+TEAMREPO [exposure,pos=\"-1.262,1.688\"]
+ADD -> INTROD
+CARE -> COMPLEX
+CARE -> DUP
+CARE -> EXP
+COMPLEX -> INTROD
+DEL -> INTROD
+DUP -> INTROD
+EXP -> KNOW
+FEEDBACK -> ADD
+FEEDBACK -> DEL
+FEEDBACK -> KNOW
+KNOW -> ADD
+KNOW -> DEL
+NCOMMITS -> KNOW
+REQ -> ADD
+REQ -> DEL
+TEAMREPO -> CARE
+TEAMREPO -> KNOW
+                      }")
+drawdag(introd.dag.9)
+```
+```{r}
+ggdag(introd.dag.9) + theme_dag_blank()
+```
+
+The backdoor criterion says we should exclude controls that are descendents of the treatment along paths to the outcome.
+If our target is the Average Causal Effect, we want to leave all channels through which the causal effect flows untouched.
+We should not control for mediators.
+Neutral controls might work though. That is, when Z is a cause of the mediator, but not an effect of the treatment.
+
+```{r}
+introd.dag.10 <- dagitty("dag {
+bb=\"-6.094,-5.092,6.372,5.521\"
+ADD [pos=\"-0.796,0.553\"]
+CARE [latent,pos=\"-1.863,-0.920\"]
+COMPLEX [pos=\"-2.299,-2.207\"]
+DEL [pos=\"-2.339,0.520\"]
+DUP [pos=\"-2.902,-2.212\"]
+EXP [latent,pos=\"-1.159,-0.920\"]
+FEEDBACK [pos=\"1.121,-0.942\"]
+INTROD [outcome,pos=\"-1.400,-3.971\"]
+KNOW [latent,pos=\"-0.106,-0.931\"]
+NCOMMITS [pos=\"-1.112,-1.558\"]
+NTESTS [pos=\"1.155,-1.574\"]
+REQ [exposure,pos=\"-1.782,1.553\"]
+ADD -> CARE
+ADD -> KNOW
+CARE -> COMPLEX
+CARE -> DUP
+CARE -> INTROD
+COMPLEX -> INTROD
+DEL -> CARE
+DEL -> KNOW
+DUP -> INTROD
+EXP -> KNOW
+FEEDBACK -> ADD
+FEEDBACK -> DEL
+FEEDBACK -> INTROD
+FEEDBACK -> KNOW
+KNOW -> INTROD
+NCOMMITS -> EXP
+NTESTS -> FEEDBACK
+REQ -> ADD
+REQ -> DEL
+}")
+drawdag(introd.dag.10)
+```
+
+```{r}
+adjustmentSets(introd.dag.10)
+```
+
+```{r}
+introd.dag.11 <- dagitty("dag {
+bb=\"-6.094,-5.092,6.372,5.521\"
+ADD [exposure,pos=\"-0.636,-1.651\"]
+CARE [latent,pos=\"-2.527,0.459\"]
+COMPLEX [pos=\"-2.299,-2.207\"]
+DEL [exposure,pos=\"-1.507,-1.662\"]
+DUP [pos=\"-2.902,-2.212\"]
+EXP [latent,pos=\"-0.159,0.184\"]
+FEEDBACK [pos=\"-1.004,-0.503\"]
+INTROD [outcome,pos=\"-1.400,-3.971\"]
+KNOW [latent,pos=\"0.484,-1.410\"]
+NCOMMITS [pos=\"-0.837,0.717\"]
+NTESTS [pos=\"-1.601,0.151\"]
+ADD -> INTROD
+CARE -> ADD
+CARE -> COMPLEX
+CARE -> DEL
+CARE -> DUP
+COMPLEX -> INTROD
+DEL -> INTROD
+DUP -> INTROD
+EXP -> KNOW
+FEEDBACK -> ADD
+FEEDBACK -> DEL
+FEEDBACK -> KNOW
+KNOW -> INTROD
+NCOMMITS -> EXP
+NTESTS -> FEEDBACK
+}
+")
+drawdag(introd.dag.11)
+
+```
+
+```{r}
+introd.dag.12 <- dagitty("
+             dag {
+bb=\"-3.165,-3.602,3.813,3.596\"
+ADD [exposure,pos=\"-1.894,-2.371\"]
+COMPLEX [pos=\"0.784,2.997\"]
+DUP [pos=\"3.232,0.427\"]
+FEAR [latent,pos=\"0.028,0.052\"]
+INTROD [outcome,pos=\"0.529,-3.002\"]
+TESTS [pos=\"-2.584,1.942\"]
+ADD -> INTROD
+COMPLEX -> FEAR
+DUP -> FEAR
+FEAR -> ADD
+FEAR -> INTROD
+TESTS -> FEAR
+}
+                         ")
+drawdag(introd.dag.12)
+
+```
+
+```{r}
+adjustmentSets(introd.dag.12)
+```
+
+
+```{r}
+introd.dag.13 <- dagitty("dag {
+bb=\"-3.165,-3.602,3.813,3.596\"
+ADD [exposure,pos=\"-1.894,-2.371\"]
+COMPLEX [pos=\"0.313,-1.217\"]
+DUP [pos=\"1.504,-1.362\"]
+INTROD [outcome,pos=\"0.529,-3.002\"]
+TESTS [pos=\"-0.975,-1.011\"]
+ADD -> INTROD
+COMPLEX -> ADD
+COMPLEX -> INTROD
+DUP -> ADD
+DUP -> INTROD
+TESTS -> ADD
+TESTS -> INTROD
+}
+
+                         ")
+drawdag(introd.dag.13)
+
+```
+
+```{r}
+adjustmentSets(introd.dag.13)
+```
+
+
+We have four possible adjustment sets. We have to condition on X4, but as it is a collider (receiving arrows both from X1 and X2), this will open the causal path, introducing bias.
+
+```{r}
+pearl.dag.fig.3.4 <- dagitty("dag {
+Xi [exposure]
+Xj [outcome]
+X1 -> X3
+X1 -> X4
+X2 -> X4 
+X2 -> X5
+X3 -> Xi
+X4 -> Xi
+X4 -> Xj
+X5 -> Xj
+Xi -> X6
+X6 -> Xj
+                             }")
+drawdag(pearl.dag.fig.3.4)
+adjustmentSets(pearl.dag.fig.3.4)
+```
+If we make X4 a pipe instead of a collider, it is enough to condition on X4.
+
+```{r}
+pearl.dag.fig.3.4.pipe <- dagitty("dag {
+Xi [exposure]
+Xj [outcome]
+X1 -> X3
+X1 -> X4
+X4 -> X2 
+X2 -> X5
+X3 -> Xi
+X4 -> Xi
+X4 -> Xj
+X5 -> Xj
+Xi -> X6
+X6 -> Xj
+                             }")
+drawdag(pearl.dag.fig.3.4.pipe)
+adjustmentSets(pearl.dag.fig.3.4.pipe)
+```
+
+```{r}
+my.dag <- dagitty("dag {
+ADD [exposure]
+INTROD [outcome]
+ADD -> REM
+ADD -> DUP
+ADD -> COMPLEX 
+DUP -> COMPLEX
+REM -> INTROD
+DUP -> INTROD
+COMPLEX -> INTROD
+ADD -> INTROD
+}")
+drawdag(my.dag)
+adjustmentSets(my.dag)
+
+```
+
+```{r}
+d.0 <- dagitty("dag {
+lang [exposure]
+rank [outcome]
+skill [unobserved]
+lang -> rank
+lang -> size
+nick -> lang 
+nick -> size
+nick -> skill
+challenge -> nick
+challenge -> rank
+challenge -> skill
+skill -> rank
+}")
+drawdag(d.0)
+adjustmentSets(d.0)
+impliedConditionalIndependencies(d.0)
+```
+
+```{r}
+d.1 <- dagitty("dag {
+lang [exposure]
+rank [outcome]
+skill [unobserved]
+lang -> rank
+lang -> size
+nick -> lang 
+nick -> size
+nick -> skill
+challenge -> nick
+challenge -> rank
+challenge -> skill
+skill -> rank
+skill -> size
+}")
+drawdag(d.1)
+adjustmentSets(d.1)
+impliedConditionalIndependencies(d.1)
+```
+
+```{r}
+d.2 <- dagitty("dag {
+lang [exposure]
+rank [outcome]
+skill [unobserved]
+lang -> rank
+lang -> size
+nick -> lang 
+nick -> size
+nick -> skill
+challenge -> nick
+challenge -> rank
+challenge -> skill
+skill -> rank
+skill -> size
+nick -> size
+}")
+drawdag(d.2)
+adjustmentSets(d.2)
+impliedConditionalIndependencies(d.2)
+```
+
+```{r}
+test.dag <- dagitty("dag {
+ADD [exposure]
+INTROD [outcome]
+KNOW [unobserved]
+CLEAN [unobserved]
+CLEAN -> REM
+CLEAN -> ADD
+REM -> INTROD
+DUP -> COMPLEX
+KNOW -> COMPLEX
+KNOW <- DUP
+KNOW <- ADD
+DUP -> ADD
+COMPLEX -> ADD
+ADD -> INTROD
+}")
+drawdag(test.dag)
+adjustmentSets(test.dag)
+impliedConditionalIndependencies(test.dag)
+
+```
+```{r}
+test.dag <- dagitty("dag {
+ADD [exposure]
+INTROD [outcome]
+KNOW [unobserved]
+CLEAN [unobserved]
+CLEAN -> REM
+CLEAN -> ADD
+REM -> INTROD
+COMPLEX -> INTROD
+DUP -> INTROD
+DUP -> COMPLEX -> KNOW
+DUP -> KNOW
+KNOW -> ADD
+DUP -> ADD
+COMPLEX -> ADD
+ADD -> INTROD
+}")
+ggdag(test.dag)
+#drawdag(test.dag)
+adjustmentSets(test.dag)
+impliedConditionalIndependencies(test.dag)
+
+```
+
+
+```{r}
+adjustmentSets(test.dag)
+
+```
+
+
+```{r}
+updated_dag <- dagitty("dag {
+bb=\"0,0,1,1\"
+ADD [adjusted,pos=\"0.603,0.269\"]
+CLEAN [latent,pos=\"0.186,0.482\"]
+COMP [adjusted,pos=\"0.529,0.397\"]
+DEL [adjusted,pos=\"0.594,0.490\"]
+DUP [adjusted,pos=\"0.512,0.103\"]
+INTR [outcome,pos=\"0.928,0.296\"]
+KNOW [latent,pos=\"0.198,0.067\"]
+TEAM [exposure,pos=\"0.065,0.279\"]
+ADD -> INTR
+CLEAN -> ADD
+CLEAN -> DEL
+COMP -> ADD
+COMP -> INTR
+COMP -> KNOW
+DEL -> ADD
+DEL -> INTR
+DUP -> ADD
+DUP -> COMP
+DUP -> INTR
+DUP -> KNOW
+KNOW -> ADD
+TEAM -> ADD
+TEAM -> CLEAN
+TEAM -> COMP
+TEAM -> DEL
+TEAM -> DUP
+TEAM -> KNOW
+}") |> tidy_dagitty()
+ggdag(updated_dag, exposures = "TEAM") + theme_dag()
+```
+```{r}
+coords <- data.frame(name=c("TEAM", "KNOW", "CLEAN", "DUP", "COMP", "ADD", "DEL", "INTR"), 
+                     x=c(        0,    0.2,    0.4,   0.4,   0.35,   0.55,   0.38, 1.0),
+                     y=c(     -0.03,    0.2,   -0.08,   0.2,  0.03,   0.07,  -0.2, 0))
+dagified <- dagify( INTR ~ DEL + COMP + ADD + DUP + TEAM, 
+                    COMP ~ TEAM + DUP,
+                    DEL ~ TEAM + CLEAN,
+                    ADD ~ COMP + CLEAN + KNOW + DUP,
+                    DUP ~ TEAM,
+                    CLEAN ~ TEAM,
+                    KNOW ~ TEAM + DUP + COMP,
+                    exposure = "TEAM",
+                    outcome = "INTR",
+                    latent = c("CLEAN", "KNOW"),
+                    coords=coords)
+(p <- ggdag_status(dagified) + theme_dag() + theme(legend.position="bottom") + guides(color = guide_legend(override.aes = list(size = 2), title=NULL, direction="horizontal", nrow = 1)) 
+  )
+ggsave("causal-dag.pdf", p, device = "pdf", dpi = 1200, width=15, height=17.8, units="cm") 
+```
+
+```{r}
+impliedConditionalIndependencies(dagified)
+```
+
+
+```{r}
+(p <- ggdag_adjustment_set(dagified, shadow = T) + theme_dag() )
+
+```
+```{r}
+coords <- data.frame(name=c("TEAM", "KNOW", "CLEAN", "DUP", "COMP", "ADD", "REM", "INTR"), 
+                     x=c(        0,    0.2,    0.4,   0.4,   0.35,   0.55,   0.38, 1.0),
+                     y=c(     -0.03,    0.2,   -0.08,   0.2,  0.03,   0.07,  -0.2, 0))
+dagified <- dagify( INTR ~ REM + COMP + ADD + DUP + TEAM, 
+                    COMP ~ TEAM + DUP,
+                    REM ~ TEAM + CLEAN,
+                    ADD ~ COMP + CLEAN + KNOW + DUP,
+                    DUP ~ TEAM,
+                    CLEAN ~ TEAM,
+                    KNOW ~ TEAM + DUP + COMP,
+                    exposure = "TEAM",
+                    outcome = "INTR",
+                    latent = c("CLEAN", "KNOW"),
+                    coords=coords)
+(p <- ggdag_status(dagified) + theme_dag() + theme(legend.position="bottom") + guides(color = guide_legend(override.aes = list(size = 2), title=NULL, direction="horizontal", nrow = 1)) 
+  )
+
+```
+```{r}
+figsave("causal-dag.pdf", p)
 ```
 

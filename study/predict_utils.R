@@ -70,7 +70,7 @@ plot_cumulative_prob_of_duplicates <- function(predictions) {
   removed <- predictions |> select(removed) |> distinct()
   complexity <- predictions |> select(complexity) |> distinct()
   duplicates <- predictions |> select(duplicates) |> distinct()
-  predictions |> mutate(predict_INTROD = .prediction) |> group_by(team, repo, predict_INTROD) |> ggplot(aes(x=predict_INTROD, color=team)) + stat_ecdf() + facet_wrap(~ repo) + 
+  predictions |> mutate(predict_INTROD = .prediction) |> group_by(team, repo, predict_INTROD) |> ggplot(aes(x=predict_INTROD, color=team)) + stat_ecdf() + facet_wrap(~ repo, nrow = 2) + 
     xlab("Maximum number of introduced duplicates") +
     ggtitle("Cumulative probability of introduced duplicates",  
             paste0("added: ", round(added$added, 0), " removed: ", round(removed$removed, 0), " complexity: ", round(complexity$complexity, 0), " duplicates: ", round(duplicates$duplicates, 0))) +
@@ -102,4 +102,25 @@ histogram_per_team <- function(postpredict) {
   return (p)
 }
 
+onepred <- function(added=q99(data$ADD), removed=q99(data$DEL), complexity = q95(data$COMPLEX), duplicates=q95(data$DUP), 
+                    teams=c("Arch", "Blue", "Brown","Red", "Green", "Yellow", "Orange", "NewTeam"), 
+                    repos=c("Venus", "Jupiter", "IntTest", "Mars", "Neptune", "Saturn", "Uranus", "Mercury")) {
+  pred <- predict_for_team(m, teams, repo=repos, added, removed, complexity, duplicates)
+  # assumes we know that total number of n is 10000 (hence the n/100) - should really calculate this instead...
+  p0 <- pred |> group_by(added, removed, complexity, duplicates, team, repo, .prediction) |> summarize(n = n()) |> filter(.prediction == 0) |> summarize(pred0=100-(n/100)) |> ungroup() |> group_by(repo) |> mutate(rank0 = rank(pred0, ties.method = "min"))
+  p5 <- pred |> group_by(added, removed, complexity, duplicates, team, repo, .prediction) |> summarize(n = n()) |> filter(.prediction < 6 ) |> summarize(pred5=100-(sum(n)/100)) |> ungroup() |> group_by(repo) |> mutate(rank5 = rank(pred5, ties.method = "min"))
+  merge(p0,p5) 
+}
+
+duplicates_probability <- function(predictions) {
+  params = predictions |> select(added, removed, complexity, duplicates) |> distinct()
+  stopifnot(length(params$added) == 1)
+  predictions |> ggplot(aes(x=team, y=pred0/100, color=team)) + geom_boxplot() + facet_wrap(~ repo, nrow=2) + scale_color_manual(values=COLOR_BY_TEAM) + theme_bw() + ggtitle("Probability of any duplicate per team and repository", paste("added", params$added, "removed", params$removed, "complexity", params$complexity, "duplicates", params$duplicates)) + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ylab("P(INTROD > 0)")
+}
+
+more_five_probability <- function(predictions) {
+  params = predictions |> select(added, removed, complexity, duplicates) |> distinct()
+  stopifnot(length(params$added) == 1)
+  predictions |> ggplot(aes(x=team, y=pred5/100, color=team)) + geom_boxplot() + facet_wrap(~ repo) + scale_color_manual(values=COLOR_BY_TEAM) + theme_bw() + ggtitle("Probability of more than five duplicates per team and repository", paste("added", params$added, "removed", params$removed, "complexity", params$complexity, "duplicates", params$duplicates)) + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ylab("P(INTROD > 5)")
+}
 

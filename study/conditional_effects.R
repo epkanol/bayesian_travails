@@ -26,7 +26,7 @@ plot_logCOMPLEX_by_logADD <- function(model, someData, ftot) {
   aRepo <- scalars$repo
   added_points <- c(P25=q25(data$ADD), P50=q50(data$ADD), P75=q75(data$ADD), P99=q99(data$ADD), SMAX=max(data$ADD))
   cutpoints <- append(scale_added(added_points), -Inf, after=0)
-  d <- someData |> mutate(added_category=cut(d$A, cutpoints, labels=c("P25", "P50", "P75", "P99", "SMAX")))
+  d <- someData |> mutate(added_category=cut(someData$A, cutpoints, labels=c("P25", "P50", "P75", "P99", "SMAX")))
   observed <- bind_cols(d, model$criteria$loo$diagnostics) |> filter(team == aTeam, repo == aRepo)
   return(ftot |> ggplot(aes(x=complex)) +
     geom_smooth(aes(y=Estimate, ymin=Q5.5, ymax=Q94.5, group=added_category, color=added_category), stat="identity", alpha=.25, linewidth=.5) +
@@ -60,7 +60,7 @@ plot_logADD_by_logCOMPLEX <- function(model, someData, ftot) {
   aRepo <- scalars$repo
   complex_points <- c(P25=q25(data$COMPLEX), P50=q50(data$COMPLEX), P75=q75(data$COMPLEX), P99=q99(data$COMPLEX), SMAX=max(data$COMPLEX))
   cutpoints <- append(scale_complexity(complex_points), -Inf, after=0)
-  d <- someData |> mutate(complex_category=cut(d$C, cutpoints, labels=c("P25", "P50", "P75", "P99", "SMAX")))
+  d <- someData |> mutate(complex_category=cut(someData$C, cutpoints, labels=c("P25", "P50", "P75", "P99", "SMAX")))
   observed <- bind_cols(d, model$criteria$loo$diagnostics) |> filter(team == aTeam, repo == aRepo)
   return(ftot |> ggplot(aes(x=added)) +
            geom_smooth(aes(y=Estimate, ymin=Q5.5, ymax=Q94.5, group=complex_category, color=complex_category), stat="identity", alpha=.25, linewidth=.5) +
@@ -93,7 +93,7 @@ plot_logADD_by_logDUP <- function(model, someData, ftot) {
   aRepo <- scalars$repo
   dup_points <- c(P50=q50(data$DUP), P75=q75(data$DUP), P99=q99(data$DUP), SMAX=max(data$DUP))
   cutpoints <- append(scale_duplicates(dup_points), -Inf, after=0)
-  d <- someData |> mutate(duplicates_category=cut(d$D, cutpoints, labels=c("P50", "P75", "P99", "SMAX")))
+  d <- someData |> mutate(duplicates_category=cut(someData$D, cutpoints, labels=c("P50", "P75", "P99", "SMAX")))
   observed <- bind_cols(d, model$criteria$loo$diagnostics) |> filter(team == aTeam, repo == aRepo)
   return(ftot |> ggplot(aes(x=added)) +
            geom_smooth(aes(y=Estimate, ymin=Q5.5, ymax=Q94.5, group=duplicates_category, color=duplicates_category), stat="identity", alpha=.25, linewidth=.5) +
@@ -125,7 +125,7 @@ plot_logADD_by_logREMOVED <- function(model, someData, ftot, aTeam, aRepo) {
   aRepo <- scalars$repo
   removed_points <- c(P25=q25(data$DEL), P50=q50(data$DEL), P75=q75(data$DEL), P99=q99(data$DEL), SMAX=max(data$DEL))
   cutpoints <- append(scale_removed(removed_points), -Inf, after=0)
-  d <- someData |> mutate(removed_category=cut(d$R, cutpoints, labels=names(removed_points)))
+  d <- someData |> mutate(removed_category=cut(someData$R, cutpoints, labels=names(removed_points)))
   observed <- bind_cols(d, model$criteria$loo$diagnostics) |> filter(team == aTeam, repo == aRepo)
   return(ftot |> ggplot(aes(x=added)) +
            geom_smooth(aes(y=Estimate, ymin=Q5.5, ymax=Q94.5, group=removed_category, color=removed_category), stat="identity", alpha=.25, linewidth=.5) +
@@ -133,6 +133,71 @@ plot_logADD_by_logREMOVED <- function(model, someData, ftot, aTeam, aRepo) {
            ggtitle(paste0("Conditional effects of team ", aTeam, " in repo ", aRepo),
                    paste0("existing duplicates: ", duplicates, ", complexity: ", complex)))
 }
+
+condeffect_logCOMPLEX_by_logDUP <- function(model, someData, aTeam, aRepo, added=q50(data$ADD), removed=q50(data$REMOVED), robust=F) {
+  items <- 2000
+  scalars <- data.frame(A=scale_added(added),
+                        R=scale_removed(removed),
+                        team=aTeam,
+                        repo=aRepo)
+  complex_points <- seq(from=scale_complexity(min(data$COMPLEX)), to=scale_complexity(roundUpNice(max(data$COMPLEX))), length.out=items)
+  dup_points <- c(P50=q50(data$DUP), P95=q95(data$DUP), P99=q99(data$DUP), SMAX=max(data$DUP))
+  complex <- data.frame(C=complex_points, complexity=unscale_complexity(complex_points))
+  duplicates <- data.frame(D=scale_duplicates(dup_points), duplicates=dup_points, dup_category=names(dup_points))
+  grid <- expand_grid(scalars, complex, duplicates)
+  f <- predict(model, newdata=grid, probs=c(.055, .945), allow_new_levels=T, robust=robust) |> data.frame() |> bind_cols(grid)
+}
+
+plot_logCOMPLEX_by_logDUP <- function(model, someData, ftot, aTeam, aRepo) {
+  scalars <- ftot |> select(A, R, team, repo) |> distinct()
+  stopifnot(length(scalars[1]) == 1)
+  added <- unscale_added(scalars$A)
+  removed <- unscale_removed(scalars$R)
+  aTeam <- scalars$team
+  aRepo <- scalars$repo
+  dup_points <- c(P50=q50(data$DUP), P95=q95(data$DUP), P99=q99(data$DUP), SMAX=max(data$DUP))
+  cutpoints <- append(scale_duplicates(dup_points), -Inf, after=0)
+  d <- someData |> mutate(dup_category=cut(someData$D, cutpoints, labels=names(dup_points)))
+  observed <- bind_cols(d, model$criteria$loo$diagnostics) |> filter(team == aTeam, repo == aRepo)
+  return(ftot |> ggplot(aes(x=complexity)) +
+           geom_smooth(aes(y=Estimate, ymin=Q5.5, ymax=Q94.5, group=dup_category, color=dup_category), stat="identity", alpha=.25, linewidth=.5) +
+           geom_point(data=observed, aes(y=y, x=unscale_complexity(C), color=dup_category), alpha=0.2) +
+           ggtitle(paste0("Conditional effects of team ", aTeam, " in repo ", aRepo),
+                   paste0("added: ", added, ", removed: ", removed)))
+}
+
+condeffect_logCOMPLEX_by_logDUP_median_q99 <- function(model, someData, aTeam, aRepo, added=q50(data$ADD), removed=q50(data$REMOVED), robust=F) {
+  items <- 4000
+  scalars <- data.frame(A=scale_added(added),
+                        R=scale_removed(removed),
+                        team=aTeam,
+                        repo=aRepo)
+  complex_points <- seq(from=scale_complexity(min(data$COMPLEX)), to=scale_complexity(roundUpNice(max(data$COMPLEX))), length.out=items)
+  dup_points <- c(Q50=q50(data$DUP), Q99=q99(data$DUP))
+  complex <- data.frame(C=complex_points, complexity=unscale_complexity(complex_points))
+  duplicates <- data.frame(D=scale_duplicates(dup_points), duplicates=dup_points, dup_category=names(dup_points))
+  grid <- expand_grid(scalars, complex, duplicates)
+  f <- predict(model, newdata=grid, probs=c(.055, .945), allow_new_levels=T, robust=robust) |> data.frame() |> bind_cols(grid)
+}
+
+plot_logCOMPLEX_by_logDUP_median_q99 <- function(model, someData, ftot, aTeam, aRepo) {
+  scalars <- ftot |> select(A, R, team, repo) |> distinct()
+  stopifnot(length(scalars[1]) == 1)
+  added <- unscale_added(scalars$A)
+  removed <- unscale_removed(scalars$R)
+  aTeam <- scalars$team
+  aRepo <- scalars$repo
+  dup_points <- c(Q50=q50(data$DUP), Q99=q99(data$DUP), SMAX=max(data$DUP))
+  cutpoints <- append(scale_duplicates(dup_points), -Inf, after=0)
+  d <- someData |> mutate(dup_category=cut(someData$D, cutpoints, labels=names(dup_points)))
+  observed <- bind_cols(d, model$criteria$loo$diagnostics) |> filter(team == aTeam, repo == aRepo)
+  return(ftot |> ggplot(aes(x=complexity)) +
+           geom_smooth(aes(y=Estimate, ymin=Q5.5, ymax=Q94.5, group=dup_category, color=dup_category), stat="identity", alpha=.25, linewidth=.5) +
+           geom_point(data=observed, aes(y=y, x=unscale_complexity(C), color=dup_category), alpha=0.2) +
+           ggtitle(paste0("Conditional effects of team ", aTeam, " in repo ", aRepo),
+                   paste0("added: ", added, ", removed: ", removed)))
+}
+
 
 
 ## Not converted below...
